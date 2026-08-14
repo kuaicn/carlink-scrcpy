@@ -1,11 +1,9 @@
 // scrcpy server 车机魔改版 —— 手机端投屏采集/编码/触控注入库
 // 基于上游 Genymobile/scrcpy v4.1 (Apache-2.0)
-// 以 java_library 编入 ROM，由互联服务 (privapp) 通过 static_libs 依赖，在其进程内运行。
+// 以 android_library 编入 ROM，由互联服务 (privapp) 通过 static_libs 依赖，在其进程内运行。
 
-java_library {
+android_library {
     name: "carlink_scrcpy",
     srcs: ["src/**/*.java"],
-    // 树内编译，直接使用 framework（含 hidden API），不走 SDK
-    sdk_version: "none",
-    libs: ["framework"],
+    // sdk_version 缺省 = 直编树内 platform（含 hidden API），与 WindowManager-Shell 同款
 }
