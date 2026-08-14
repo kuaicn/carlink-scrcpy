@@ -1,6 +1,6 @@
 package com.genymobile.scrcpy.wrappers;
 
-import com.genymobile.scrcpy.FakeContext;
+import com.genymobile.scrcpy.util.AppContext;
 
 import android.content.ClipData;
 import android.content.Context;
@@ -9,7 +9,7 @@ public final class ClipboardManager {
     private final android.content.ClipboardManager manager;
 
     static ClipboardManager create() {
-        android.content.ClipboardManager manager = (android.content.ClipboardManager) FakeContext.get().getSystemService(Context.CLIPBOARD_SERVICE);
+        android.content.ClipboardManager manager = (android.content.ClipboardManager) AppContext.get().getSystemService(Context.CLIPBOARD_SERVICE);
         if (manager == null) {
             // Some devices have no clipboard manager
             // <https://github.com/Genymobile/scrcpy/issues/1440>

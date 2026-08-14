@@ -28,7 +28,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SurfaceEncoder implements AsyncProcessor {
 
-    private static final int DEFAULT_I_FRAME_INTERVAL = 10; // seconds
     private static final int REPEAT_FRAME_DELAY_US = 100_000; // repeat after 100ms
     private static final String KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder";
 
@@ -43,6 +42,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final int videoBitRate;
     private final int maxSize;
     private final float maxFps;
+    private final int iFrameInterval;
     private final boolean downsizeOnError;
     private final int minSizeAlignment;
     private final boolean ignoreVideoEncoderConstraints;
@@ -63,6 +63,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         this.videoBitRate = options.getVideoBitRate();
         this.maxSize = options.getMaxSize();
         this.maxFps = options.getMaxFps();
+        this.iFrameInterval = options.getIFrameInterval();
         this.codecOptions = options.getVideoCodecOptions();
         this.encoderName = options.getVideoEncoder();
         this.downsizeOnError = options.getDownsizeOnError();
@@ -73,7 +74,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     private void streamCapture() throws IOException, ConfigurationException {
         Codec codec = streamer.getCodec();
         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
-        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
+        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, iFrameInterval, codecOptions);
 
         MediaCodecInfo.VideoCapabilities caps;
         int alignment;
@@ -307,7 +308,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
     }
 
-    private static MediaFormat createFormat(String videoMimeType, int bitRate, float maxFps, List<CodecOption> codecOptions) {
+    private static MediaFormat createFormat(String videoMimeType, int bitRate, float maxFps, int iFrameInterval, List<CodecOption> codecOptions) {
         MediaFormat format = new MediaFormat();
         format.setString(MediaFormat.KEY_MIME, videoMimeType);
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
@@ -317,7 +318,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         if (Build.VERSION.SDK_INT >= AndroidVersions.API_24_ANDROID_7_0) {
             format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
         }
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, DEFAULT_I_FRAME_INTERVAL);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
         // display the very first frame, and recover from bad quality when no new frames
         format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_DELAY_US); // µs
         if (Build.VERSION.SDK_INT >= AndroidVersions.API_23_ANDROID_6_0) {

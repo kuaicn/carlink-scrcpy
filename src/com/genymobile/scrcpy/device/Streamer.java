@@ -33,13 +33,17 @@ public final class Streamer {
         return codec;
     }
 
+    /**
+     * Write the 4-byte codec id: these are the very first bytes of the video stream.
+     * <p>
+     * Unlike upstream, this is unconditional (not tied to {@code sendStreamMeta}): the CarLink protocol mandates the codec id header but
+     * no session meta packets and no device-name meta.
+     */
     public void writeVideoHeader() throws IOException {
-        if (sendStreamMeta) {
-            ByteBuffer buffer = ByteBuffer.allocate(4);
-            buffer.putInt(codec.getId());
-            buffer.flip();
-            IO.writeFully(fd, buffer);
-        }
+        ByteBuffer buffer = ByteBuffer.allocate(4);
+        buffer.putInt(codec.getId());
+        buffer.flip();
+        IO.writeFully(fd, buffer);
     }
 
     public void writePacket(ByteBuffer buffer, long pts, boolean config, boolean keyFrame) throws IOException {

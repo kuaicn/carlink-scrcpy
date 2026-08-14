@@ -1,7 +1,7 @@
 package com.genymobile.scrcpy.wrappers;
 
 import com.genymobile.scrcpy.AndroidVersions;
-import com.genymobile.scrcpy.FakeContext;
+import com.genymobile.scrcpy.util.AppContext;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.SettingsException;
 
@@ -10,6 +10,7 @@ import android.content.AttributionSource;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Process;
 
 import java.io.Closeable;
 import java.lang.reflect.Method;
@@ -81,17 +82,17 @@ public final class ContentProvider implements Closeable {
             Object[] args;
 
             if (Build.VERSION.SDK_INT >= AndroidVersions.API_31_ANDROID_12 && callMethodVersion == 0) {
-                args = new Object[]{FakeContext.get().getAttributionSource(), "settings", callMethod, arg, extras};
+                args = new Object[]{AppContext.get().getAttributionSource(), "settings", callMethod, arg, extras};
             } else {
                 switch (callMethodVersion) {
                     case 1:
-                        args = new Object[]{FakeContext.PACKAGE_NAME, null, "settings", callMethod, arg, extras};
+                        args = new Object[]{AppContext.get().getPackageName(), null, "settings", callMethod, arg, extras};
                         break;
                     case 2:
-                        args = new Object[]{FakeContext.PACKAGE_NAME, "settings", callMethod, arg, extras};
+                        args = new Object[]{AppContext.get().getPackageName(), "settings", callMethod, arg, extras};
                         break;
                     default:
-                        args = new Object[]{FakeContext.PACKAGE_NAME, callMethod, arg, extras};
+                        args = new Object[]{AppContext.get().getPackageName(), callMethod, arg, extras};
                         break;
                 }
             }
@@ -135,7 +136,7 @@ public final class ContentProvider implements Closeable {
     public String getValue(String table, String key) throws SettingsException {
         String method = getGetMethod(table);
         Bundle arg = new Bundle();
-        arg.putInt(CALL_METHOD_USER_KEY, FakeContext.ROOT_UID);
+        arg.putInt(CALL_METHOD_USER_KEY, Process.ROOT_UID);
         try {
             Bundle bundle = call(method, key, arg);
             if (bundle == null) {
@@ -151,7 +152,7 @@ public final class ContentProvider implements Closeable {
     public void putValue(String table, String key, String value) throws SettingsException {
         String method = getPutMethod(table);
         Bundle arg = new Bundle();
-        arg.putInt(CALL_METHOD_USER_KEY, FakeContext.ROOT_UID);
+        arg.putInt(CALL_METHOD_USER_KEY, Process.ROOT_UID);
         arg.putString(NAME_VALUE_TABLE_VALUE, value);
         try {
             call(method, key, arg);

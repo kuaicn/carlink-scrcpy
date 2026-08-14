@@ -1,9 +1,9 @@
 package com.genymobile.scrcpy.wrappers;
 
 import com.genymobile.scrcpy.AndroidVersions;
-import com.genymobile.scrcpy.FakeContext;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.Size;
+import com.genymobile.scrcpy.util.AppContext;
 import com.genymobile.scrcpy.util.Command;
 import com.genymobile.scrcpy.util.Ln;
 
@@ -177,7 +177,7 @@ public final class DisplayManager {
         Constructor<android.hardware.display.DisplayManager> ctor = android.hardware.display.DisplayManager.class.getDeclaredConstructor(
                 Context.class);
         ctor.setAccessible(true);
-        android.hardware.display.DisplayManager dm = ctor.newInstance(FakeContext.get());
+        android.hardware.display.DisplayManager dm = ctor.newInstance(AppContext.get());
         return dm.createVirtualDisplay(name, width, height, dpi, surface, flags);
     }
 
@@ -217,7 +217,7 @@ public final class DisplayManager {
             try {
                 manager.getClass()
                         .getMethod("registerDisplayListener", displayListenerClass, Handler.class, long.class, String.class)
-                        .invoke(manager, displayListenerProxy, handler, EVENT_FLAG_DISPLAY_CHANGED, FakeContext.PACKAGE_NAME);
+                        .invoke(manager, displayListenerProxy, handler, EVENT_FLAG_DISPLAY_CHANGED, AppContext.get().getPackageName());
             } catch (NoSuchMethodException e) {
                 try {
                     manager.getClass()

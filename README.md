@@ -1,6 +1,6 @@
 # carlink-scrcpy
 
-Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集 / 编码 / 触控注入库，以 `java_library` 形式编入 Android 系统源码树（AOSP/LineageOS），由平台签名的 privapp「互联服务」在其进程内使用。
+Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集 / 编码 / 触控注入**库**。以 `java_library` 编入 Android 系统源码树（AOSP/LineageOS），由平台签名 privapp「互联服务」在其进程内加载运行——不再是上游「adb shell + app_process 独立进程」模型。
 
 - 上游基线：scrcpy **v4.1**（commit `2926c06c5dc3064ae6d8db706f1a98a37cfcf3f0`）
 - 上游仓库：<https://github.com/Genymobile/scrcpy>
@@ -9,57 +9,136 @@ Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集
 
 ## 在整体方案中的角色
 
-本库运行在自编译 LineageOS（Android 16）ROM 的平台签名 privapp「互联服务」进程内。手机端按车机屏幕参数动态创建 VirtualDisplay，本库负责采集该虚拟屏画面，经 MediaCodec 硬件编码后通过 TCP 发送到 Android 车机端解码渲染；同时通过控制通道接收车机端的触控事件，注入到该虚拟屏，实现车机反控手机。
+车机（Android）通过 TCP 连接手机 → 手机端互联服务完成握手后调用本库 `CarLinkServer.start()` → 本库按车机屏幕参数创建 VirtualDisplay，采集画面经 MediaCodec 硬件编码，通过视频 TCP 通道发给车机解码渲染；车机触控事件经控制 TCP 通道送达，由本库注入虚拟屏，实现车机反控手机。
 
-## 目录结构
+## 与上游的差异
+
+### 裁剪清单（相对上游 server 端）
+
+- **PC 客户端（`app/`，C/meson/gradle）**：车机端解码渲染由车机侧自行实现。
+- **`audio/` 整个目录**：只做画面投屏与触控注入，不涉及音频。
+- **摄像头采集**（`CameraCapture` 及 `Options` 中 `camera_*` 配置等）：画面来源只有 VirtualDisplay（`ScreenCapture` 物理屏镜像路径保留作备用）。
+- **UHID 物理键鼠模拟**（`UhidManager` 及 `TYPE_UHID_*` 消息）：不模拟物理 HID 设备，不使用 `/dev/uhid`。
+- **`CleanUp.java` 双进程清理机制**与 `util/Settings.java`：独立进程恢复设备设置的机制与 app 进程模型不兼容；会话清理由 `CarLinkServer` 的 stop/finally 链承担。
+- **上游 CI / 发布脚本 / 无关文档**：仅保留 5 篇协议相关上游文档（适用性见 `docs/carlink-protocol.md` 开头说明）。
+
+### 本次魔改清单（进程模型与网络层）
+
+1. **入口 in-process 化**：删除 `Server.java`（`main()`/`System.exit()`/反射改写 `sMainLooper` 的伪主 Looper/`dropRootPrivileges()`），新增 **`CarLinkServer`** 公开 API（Builder 配置 + start/stop/Listener 回调，见下文）。
+2. **删除 `FakeContext` / `Workarounds`**：app 进程有真实 Context，新增 `util/AppContext`（由 `CarLinkServer.start()` 用 application Context 初始化），全部内部调用点改为 `AppContext.get()`；原 `FakeContext.PACKAGE_NAME`（`com.android.shell`）调用点改为真实包名。
+3. **网络层 LocalSocket → TCP**：删除 `device/DesktopConnection.java`（adb 隧道 abstract socket），新增 `device/CarLinkConnection.java`——视频通道为本库 `ServerSocket` accept 的 TCP 连接（经 `ParcelFileDescriptor.fromSocket()` 保住 `Streamer` 的 `Os.write` 路径），控制通道为调用方握手完成后移交的已连接 TCP socket；`ControlChannel` 改为接收 `InputStream`/`OutputStream`。
+4. **wire 协议精简**：不发送 64 字节设备名 meta、无 dummy byte、无 session meta 包；视频流首 4 字节即 codec id（大端 `"h264"`/`"h265"`），随后为「12 字节头 + 裸 Annex-B」packet 序列。详见 `docs/carlink-protocol.md`。
+5. **`util/Ln` 精简**：只保留 logcat 输出（TAG `scrcpy`），删除控制台/文件描述符输出与 `disableSystemStreams()`。
+6. **`Options` 新增 `i_frame_interval` key**（上游硬编码 10s），供 `Config.iFrameIntervalSec` 透传。
+7. **虚拟屏事件导出**：`NewDisplayCapture` 的 `VirtualDisplayListener` 通知在会话编排层同时转发给 `CarLinkServer.Listener.onVirtualDisplayReady(displayId)`。
+
+## 架构与线程模型
+
+调用方在任意线程调用 `start()`：同步完成参数解析与视频 `ServerSocket` 绑定后，全部会话工作（阻塞 accept 视频连接、启动编码/控制 processor、Looper 事件泵、结束时的完整清理）运行在自建 **`HandlerThread("carlink-scrcpy")`** 上，停止时 `quitSafely()` 的只会是这个 Looper，绝不触碰 app 主 Looper。编码、控制收发各有独立线程；`Listener` 全部回调直接在本库内部线程上触发，**调用方需自行切线程**。
 
 ```
-├── Android.bp   # Soong 模块定义：java_library "carlink_scrcpy"
-├── LICENSE      # 上游 Apache-2.0 许可证（原样保留）
-├── docs/        # 上游协议相关文档（车机端开发需参考其中的 wire 协议）
-│   ├── control.md           # 控制通道协议（触控/按键注入、剪贴板等消息格式）
-│   ├── video.md             # 视频流协议（packet/frame/session meta 格式）
-│   ├── virtual-display.md   # 虚拟屏（--new-display）行为说明
-│   ├── develop.md           # server 端运行/调试方式
-│   └── device.md            # 设备端行为说明
-└── src/com/genymobile/scrcpy/   # server 端 Java 源码（裁剪后）
+调用方线程                carlink-scrcpy (HandlerThread)        video 线程            control-recv / control-send
+─────────────            ──────────────────────────────        ────────────          ──────────────────────────
+start() ───────────────> accept() 阻塞等车机视频连接
+  (同步 bind 完即返回)     启动 SurfaceEncoder / Controller ──> MediaCodec 编码循环      读控制消息→注入虚拟屏
+                            Looper.loop() 事件泵               Os.write→视频 TCP       device 消息→控制 TCP
+stop()  ───────────────> finally 清理链：
+(任意线程, 幂等,            stop/join processors →
+  不阻塞)                   shutdown/close sockets →
+                            release 虚拟屏 → quitSafely()
+                          回调 onStopped()
 ```
 
-## 裁剪清单
+## API 快速上手
 
-相对上游 server 端，已移除以下内容：
+```java
+public final class CarLinkServer {
+    public static final class Config { /* Builder: width/height/densityDpi 必填；
+        bitRate(默认 8Mbps)、codec("h264"/"h265", 默认 h264)、maxFps(默认 0=不限)、
+        iFrameIntervalSec(默认 10)、videoPort(默认 0=自动分配) 可选 */ }
+    public interface Listener {
+        void onVirtualDisplayReady(int displayId); // 虚拟屏已创建，可 launch Activity
+        void onError(String message, Throwable cause);
+        void onStopped();                          // 会话完全结束（清理完成）
+    }
+    public static synchronized CarLinkServer start(Context context, Config config, Socket controlSocket, Listener listener);
+    public int getVideoPort();  // start() 返回后即有效
+    public void stop();         // 任意线程可调用，幂等，不阻塞（完成通知走 onStopped）
+    public boolean isRunning();
+}
+```
 
-- **PC 客户端（`app/`，C/meson/gradle）**：整个客户端与本项目无关，车机端解码渲染由车机侧自行实现。
-- **`audio/` 整个目录**（音频采集/编码/转发）：本项目只做画面投屏与触控注入，不涉及音频。
-- **摄像头采集**（`video/CameraCapture.java`、`CameraAspectRatio.java`、`CameraFacing.java`，及 `Options` 中 `camera_*` 配置、`VideoSource.CAMERA`、`Controller` 摄像头控制分支）：投屏画面来源只有物理屏 / VirtualDisplay。
-- **UHID 物理键鼠模拟**（`control/UhidManager.java`，及 `TYPE_UHID_*` 控制消息、`TYPE_UHID_OUTPUT` 设备消息的解析/构造/处理）：车机端只需注入触控事件，无需模拟物理 HID 设备。
-- **`CleanUp.java` 双进程清理机制**：上游通过独立进程恢复设备设置（show_touches / stay_awake / screen_off_timeout / 熄屏状态），与 app 进程模型不兼容，后续按服务生命周期重写。
-- **`util/Settings.java`**：仅被 `CleanUp.java` 使用，一并移除（`util/SettingsException.java` 仍被 `wrappers/ContentProvider.java` 使用，保留）。
-- **上游 CI / 发布脚本 / 无关文档**：仅保留上述 5 个协议相关文档。
+互联服务典型用法（在工作线程中执行）：
 
-此外，上游由 Gradle 构建时自动生成的 `BuildConfig` 类，在本仓库中以普通源码文件提供（`src/com/genymobile/scrcpy/BuildConfig.java`），因为 Soong 的 `java_library` 不会生成该类。
+```java
+// 1. 接受车机控制 TCP 连接（默认端口 27183，握手协议见 docs/carlink-protocol.md）
+Socket controlSocket = controlServerSocket.accept();
+
+// 2. 读车机 hello：4 字节大端长度 + UTF-8 JSON
+//    {"type":"hello","width":W,"height":H,"dpi":D,"codecs":["h264","h265"]}
+Hello hello = readHello(controlSocket); // 互联服务自行实现 JSON 握手
+
+// 3. 构造配置并启动（start 内同步绑定视频端口）
+CarLinkServer.Config config = new CarLinkServer.Config.Builder(hello.width, hello.height, hello.dpi)
+        .codec(hello.codecs.contains("h265") ? "h265" : "h264")
+        .bitRate(8_000_000)
+        .build();
+
+CarLinkServer server = CarLinkServer.start(getApplicationContext(), config, controlSocket,
+        new CarLinkServer.Listener() {
+            @Override
+            public void onVirtualDisplayReady(int displayId) {
+                // 注意：回调在本库内部线程上，需要时自行切到主线程
+                ActivityOptions options = ActivityOptions.makeBasic();
+                options.setLaunchDisplayId(displayId); // 需要 INTERNAL_SYSTEM_WINDOW（平台签名 privapp）
+                Intent intent = new Intent(context, CarLauncherActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(intent, options.toBundle());
+            }
+
+            @Override
+            public void onError(String message, Throwable cause) {
+                Log.w(TAG, "CarLink session error: " + message, cause);
+            }
+
+            @Override
+            public void onStopped() {
+                // 虚拟屏已销毁、socket 已关闭，可回到待连接状态
+            }
+        });
+
+// 4. 回 ready（含视频端口），车机随即连接该端口，会话自动开始
+writeReady(controlSocket, config.getCodec(), server.getVideoPort());
+
+// 结束会话（或任一侧断线自动结束）：
+server.stop();
+```
+
+约束：同时只允许一个会话，重复 `start()` 抛 `IllegalStateException`；`controlSocket` 必须是**已完成握手**的已连接 TCP socket，本库不做握手，只在其上读控制消息 / 写 device 消息。
 
 ## 集成方法
 
-1. 将本仓库克隆到 LineageOS 源码树内，建议路径：
-   - `vendor/<brand>/carlink/scrcpy`，或
-   - `packages/apps/CarLink/scrcpy`
-2. 在互联服务模块的 `Android.bp` 中添加静态依赖：
+1. 将本仓库放入 LineageOS 源码树，建议路径 `vendor/carlink/scrcpy`；
+2. 互联服务模块 `Android.bp` 添加 `static_libs: ["carlink_scrcpy"]`，并使用 `certificate: "platform"` + `privileged: true`；
+3. 配置 signature 权限白名单（`INJECT_EVENTS` / `INTERNAL_SYSTEM_WINDOW` / `ADD_TRUSTED_DISPLAY`）。
 
-   ```bp
-   static_libs: ["carlink_scrcpy"],
-   ```
+完整步骤、Android.bp 片段、白名单 XML 示例与 sepolicy 说明见 **[docs/integration.md](docs/integration.md)**。
 
-模块以 `sdk_version: "none"` 编译，直接依赖 `framework`，可访问 hidden API（树内编译不受 SDK 限制）。
+## 文档索引
 
-## 后续魔改清单
+- **[docs/carlink-protocol.md](docs/carlink-protocol.md)**：车机端实现的权威协议文档（握手 JSON、视频流字节布局、控制消息子集、断线语义）
+- **[docs/integration.md](docs/integration.md)**：ROM 集成指南（树内放置、Android.bp、privapp 权限、平台签名、sepolicy）
+- 上游保留文档（用户向，适用性以 `carlink-protocol.md` 开头说明为准）：
+  - [docs/control.md](docs/control.md) / [docs/video.md](docs/video.md) / [docs/virtual-display.md](docs/virtual-display.md) / [docs/device.md](docs/device.md) / [docs/develop.md](docs/develop.md)
 
-当前代码仍为上游进程模型（`main()` 入口 + 命令行参数 + LocalSocket 连接 adb 隧道），在 privapp 进程内运行前还需要以下改造：
+## 同步上游策略
 
-1. **进程模型 in-process 化**：`Server.main()` / `System.exit()` / 伪主 Looper（`prepareMainLooper()`）/ `Options.parse()` 命令行解析，改为 Builder 式配置与服务生命周期（start/stop 由互联服务调用）。
-2. **删除 `FakeContext` / `Workarounds`**：app 进程已有真实 Context，无需伪造；shell 特权能力（`dropRootPrivileges()` 中 setuid(2000) 获得的权限）改用平台签名权限替代。
-3. **`DesktopConnection` 网络层 LocalSocket → TCP**：当前基于 adb 隧道的抽象 socket；注意 `device/Streamer.java` 直接对 `FileDescriptor` 做 `Os.write`，改 TCP 后需改为 `OutputStream` 或 `ParcelFileDescriptor.fromSocket` 方式写入。
-4. **与车机端对齐 wire 协议**：视频流格式见 `docs/video.md`，控制消息格式见 `docs/control.md`（注意本仓库已移除 UHID 与摄像头相关消息）。
+- 包名与目录结构保持 `com.genymobile.scrcpy` 不变；魔改集中在少数文件，rebase 时重点关注：
+  - 新增：`CarLinkServer.java`、`device/CarLinkConnection.java`、`util/AppContext.java`（及本仓库的 `docs/carlink-*.md`）；
+  - 修改：`Options.java`（`i_frame_interval`）、`video/SurfaceEncoder.java`（i-frame 间隔透传）、`device/Streamer.java`（codec id 无条件首发）、`control/ControlChannel.java`（流式构造）、`util/Ln.java`（仅 logcat）、`wrappers/` 与 `device/Device.java`（`AppContext`）；
+  - 删除：`Server.java`、`FakeContext.java`、`Workarounds.java`、`device/DesktopConnection.java`；
+- 其余目录（`video/`、`control/`、`display/`、`opengl/`、`model/`、`wrappers/` 大部分）与上游基本一致，可直接采用上游修复；
+- `BuildConfig.VERSION_NAME` 必须跟随上游基线版本号（`Options.parse` 首参数版本校验依赖它）。
 
 ## 许可与署名
 

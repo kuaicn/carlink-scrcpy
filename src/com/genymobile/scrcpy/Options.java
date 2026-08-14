@@ -27,6 +27,7 @@ public class Options {
     private VideoSource videoSource = VideoSource.DISPLAY;
     private int videoBitRate = 8000000;
     private float maxFps;
+    private int iFrameInterval = 10; // seconds
     private float angle;
     private boolean tunnelForward;
     private Rect crop;
@@ -102,6 +103,10 @@ public class Options {
 
     public float getMaxFps() {
         return maxFps;
+    }
+
+    public int getIFrameInterval() {
+        return iFrameInterval;
     }
 
     public float getAngle() {
@@ -305,6 +310,12 @@ public class Options {
                     break;
                 case "max_fps":
                     options.maxFps = parseFloat("max_fps", value);
+                    break;
+                case "i_frame_interval":
+                    options.iFrameInterval = Integer.parseInt(value);
+                    if (options.iFrameInterval < 0) {
+                        throw new IllegalArgumentException("Invalid i-frame interval: " + options.iFrameInterval);
+                    }
                     break;
                 case "angle":
                     options.angle = parseFloat("angle", value);
