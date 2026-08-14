@@ -228,6 +228,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 control();
             } catch (IOException e) {
                 Ln.e("Controller error", e);
+            } catch (Throwable t) {
+                // In-process hosting: never let an Error escape the thread, it would kill the hosting app process
+                Ln.e("Fatal controller error", t);
             } finally {
                 Ln.d("Controller stopped");
                 listener.onTerminated(true);

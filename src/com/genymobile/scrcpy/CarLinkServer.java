@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -212,6 +213,9 @@ public final class CarLinkServer {
 
     private static CarLinkServer instance;
 
+    /** Poll interval while waiting for the video connection, so that a dead control channel is detected. */
+    private static final int VIDEO_ACCEPT_POLL_MS = 2000;
+
     private final Options options;
     private final Socket controlSocket;
     private final Listener listener;
@@ -356,8 +360,11 @@ public final class CarLinkServer {
         try {
             Ln.i("Device: [" + Build.MANUFACTURER + "] " + Build.BRAND + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")");
 
-            // Block until the car head unit connects the video channel (unblocked by stop() closing the ServerSocket)
-            Socket videoSocket = videoServerSocket.accept();
+            Socket videoSocket = acceptVideo();
+            if (videoSocket == null) {
+                // stop() was requested, or the control channel died before the video connection was established
+                return;
+            }
 
             startProcessors(videoSocket);
 
@@ -373,6 +380,40 @@ public final class CarLinkServer {
             // Otherwise: expected failure caused by stop() (e.g. "Socket closed" from accept())
         } finally {
             terminate();
+        }
+    }
+
+    /**
+     * Wait for the head unit to connect the video channel, polling so that a control channel which dies in the
+     * meantime does not leave the session stuck forever (also unblocked by {@link #stop()} closing the ServerSocket).
+     *
+     * @return the connected video socket, or {@code null} if the session must end before any video connection
+     */
+    private Socket acceptVideo() throws IOException {
+        videoServerSocket.setSoTimeout(VIDEO_ACCEPT_POLL_MS);
+        while (running.get()) {
+            try {
+                return videoServerSocket.accept();
+            } catch (SocketTimeoutException e) {
+                if (isControlSocketDead()) {
+                    Ln.w("Control channel closed while waiting for the video connection; ending session");
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @return {@code true} if the control socket is closed locally or its peer closed the connection, without
+     * consuming any protocol bytes
+     */
+    private boolean isControlSocketDead() {
+        try {
+            // SocketInputStream.available() returns -1 once the peer's FIN has been received
+            return controlSocket.isClosed() || controlSocket.getInputStream().available() < 0;
+        } catch (IOException e) {
+            return true;
         }
     }
 

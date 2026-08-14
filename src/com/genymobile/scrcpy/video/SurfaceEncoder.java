@@ -364,6 +364,10 @@ public class SurfaceEncoder implements AsyncProcessor {
                 if (!IO.isBrokenPipe(e)) {
                     Ln.e("Video encoding error", e);
                 }
+            } catch (Throwable t) {
+                // In-process hosting: never let an Error (e.g. AssertionError from a failed virtual display
+                // creation) escape the thread, it would kill the whole hosting app process
+                Ln.e("Fatal video capture error", t);
             } finally {
                 Ln.d("Screen streaming stopped");
                 listener.onTerminated(true);
