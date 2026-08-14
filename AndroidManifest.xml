@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- android_library 模块要求存在 manifest；本库无组件，仅为满足 Soong 构建 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.genymobile.scrcpy">
+</manifest>
