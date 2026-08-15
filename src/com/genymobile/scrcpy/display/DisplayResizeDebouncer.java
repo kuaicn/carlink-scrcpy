@@ -59,14 +59,17 @@ public final class DisplayResizeDebouncer {
                     newSize = request;
                     request = null;
                 }
-                callback.trigger(newSize);
+                try {
+                    callback.trigger(newSize);
+                } catch (Throwable t) {
+                    // In-process hosting: never let an exception escape the thread (e.g. a resize racing with the virtual display
+                    // release), it would kill the hosting app process; do not kill this debouncer thread either, otherwise all
+                    // subsequent resize requests would be silently dropped until the end of the session
+                    Ln.e("Debouncer error", t);
+                }
             }
         } catch (InterruptedException e) {
             // ignore
-        } catch (Throwable t) {
-            // In-process hosting: never let an exception escape the thread (e.g. a resize racing with the virtual display
-            // release), it would kill the hosting app process
-            Ln.e("Debouncer error", t);
         } finally {
             Ln.d("Debouncer thread stopped");
         }

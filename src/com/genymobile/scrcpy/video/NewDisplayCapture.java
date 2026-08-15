@@ -245,7 +245,14 @@ public class NewDisplayCapture extends SurfaceCapture {
             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
 
             if (displayImePolicy != -1) {
-                ServiceManager.getWindowManager().setDisplayImePolicy(virtualDisplayId, displayImePolicy);
+                if (Build.VERSION.SDK_INT >= AndroidVersions.API_33_ANDROID_13) {
+                    ServiceManager.getWindowManager().setDisplayImePolicy(virtualDisplayId, displayImePolicy);
+                } else {
+                    // Below Android 13 the virtual display cannot be trusted (VIRTUAL_DISPLAY_FLAG_TRUSTED is only set
+                    // above from that API level), and WindowManagerService.setDisplayImePolicy() throws a
+                    // SecurityException on untrusted displays, which would abort the whole capture
+                    Ln.w("display_ime_policy is not supported before Android 13, ignoring");
+                }
             }
 
             displayMonitor.start(virtualDisplayId, (props) -> {

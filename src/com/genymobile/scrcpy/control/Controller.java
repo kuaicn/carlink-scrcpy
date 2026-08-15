@@ -475,7 +475,21 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
-            return false;
+            // The event was generated from a previous video size (the video size changed while the event was in flight, e.g. on
+            // encoder downsize retry or display rotation): dropping a move is harmless, but dropping the release of a pressed
+            // pointer would leave it stuck, both in PointersState (a ghost pointer contaminating every later event) and in the
+            // target window (a gesture that never ends). Inject the release at its last known position instead: pointer points
+            // are stored post-mapping, so they are always valid display coordinates.
+            int existingIndex = action == MotionEvent.ACTION_UP ? pointersState.getExistingPointerIndex(pointerId) : -1;
+            if (existingIndex == -1) {
+                return false;
+            }
+            Point lastPoint = pointersState.get(existingIndex).getPoint();
+            DisplayData data = this.displayData.get();
+            if (lastPoint == null || data == null) {
+                return false;
+            }
+            pair = Pair.create(lastPoint, data.virtualDisplayId);
         }
 
         Point point = pair.first;

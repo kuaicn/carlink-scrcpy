@@ -54,9 +54,9 @@ public class AffineMatrix {
     }
 
     /**
-     * Return a matrix which converts from Normalized Device Coordinates to pixels.
+     * Return a matrix which converts from pixels to Normalized Device Coordinates.
      *
-     * @param size the target size
+     * @param size the source size
      * @return the transform matrix
      */
     public static AffineMatrix ndcFromPixels(Size size) {
@@ -66,9 +66,9 @@ public class AffineMatrix {
     }
 
     /**
-     * Return a matrix which converts from pixels to Normalized Device Coordinates.
+     * Return a matrix which converts from Normalized Device Coordinates to pixels.
      *
-     * @param size the source size
+     * @param size the target size
      * @return the transform matrix
      */
     public static AffineMatrix ndcToPixels(Size size) {
@@ -86,8 +86,10 @@ public class AffineMatrix {
     public Point apply(Point point) {
         int x = point.getX();
         int y = point.getY();
-        int xx = (int) (a * x + c * y + e);
-        int yy = (int) (b * x + d * y + f);
+        // Round to the nearest pixel: a plain (int) cast truncates toward zero, which systematically biases mapped coordinates
+        // by 0.5px on average toward the top-left, and only clamps tiny negative roundoff to 0 by accident
+        int xx = (int) Math.round(a * x + c * y + e);
+        int yy = (int) Math.round(b * x + d * y + f);
         return new Point(xx, yy);
     }
 

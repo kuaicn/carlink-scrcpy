@@ -68,7 +68,8 @@ stop()  ───────────────> finally 清理链：
 public final class CarLinkServer {
     public static final class Config { /* Builder: width/height/densityDpi 必填；
         bitRate(默认 8Mbps)、codec("h264"/"h265", 默认 h264)、maxFps(默认 0=不限)、
-        iFrameIntervalSec(默认 10)、videoPort(默认 0=自动分配) 可选 */ }
+        iFrameIntervalSec(默认 10)、videoPort(默认 0=自动分配)、
+        displayImePolicy(默认 DISPLAY_IME_POLICY_LOCAL：IME 弹在虚拟屏上；Android 13 以下忽略) 可选 */ }
     public interface Listener {
         void onVirtualDisplayReady(int displayId); // 虚拟屏已创建，可 launch Activity
         void onError(String message, Throwable cause);

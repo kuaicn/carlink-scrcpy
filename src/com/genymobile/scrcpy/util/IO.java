@@ -22,7 +22,13 @@ public final class IO {
     private static int write(FileDescriptor fd, ByteBuffer from) throws IOException {
         while (true) {
             try {
-                return Os.write(fd, from);
+                int w = Os.write(fd, from);
+                if (w == 0 && from.hasRemaining()) {
+                    // Cannot happen on a blocking fd (it writes >0 bytes or fails with an errno), but a 0-byte write would
+                    // make writeFully() spin forever
+                    throw new IOException("Os.write() wrote 0 bytes");
+                }
+                return w;
             } catch (ErrnoException e) {
                 if (e.errno != OsConstants.EINTR) {
                     throw new IOException(e);
@@ -64,9 +70,18 @@ public final class IO {
         return builder.toString();
     }
 
+    /**
+     * @return {@code true} if the write failed because the peer is gone: {@code EPIPE} (write after an orderly close) or
+     * {@code ECONNRESET} (the peer sent a RST, e.g. the head unit crashed or rebooted). Both are expected on session
+     * teardown and must terminate the stream cleanly, not trigger the encoder retry path.
+     */
     public static boolean isBrokenPipe(IOException e) {
         Throwable cause = e.getCause();
-        return cause instanceof ErrnoException && ((ErrnoException) cause).errno == OsConstants.EPIPE;
+        if (!(cause instanceof ErrnoException)) {
+            return false;
+        }
+        int errno = ((ErrnoException) cause).errno;
+        return errno == OsConstants.EPIPE || errno == OsConstants.ECONNRESET;
     }
 
     public static boolean isBrokenPipe(Exception e) {

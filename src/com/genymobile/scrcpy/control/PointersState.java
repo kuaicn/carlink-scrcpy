@@ -46,6 +46,15 @@ public class PointersState {
         return pointers.get(index);
     }
 
+    /**
+     * Return the index of the pointer with this id, or -1 if it does not exist.
+     * <p>
+     * Unlike {@link #getPointerIndex(long)}, it never creates a new pointer.
+     */
+    public int getExistingPointerIndex(long id) {
+        return indexOf(id);
+    }
+
     public int getPointerIndex(long id) {
         int index = indexOf(id);
         if (index != -1) {

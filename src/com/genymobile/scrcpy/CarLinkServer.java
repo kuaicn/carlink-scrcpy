@@ -71,6 +71,22 @@ public final class CarLinkServer {
         public static final int DEFAULT_I_FRAME_INTERVAL_SEC = 10;
         public static final int DEFAULT_VIDEO_PORT = 0; // auto-allocated
 
+        // Values mirror the @SystemApi android.view.WindowManager#DISPLAY_IME_POLICY_* constants (they are the protocol of
+        // WindowManagerService.setDisplayImePolicy(), so they are stable by design)
+        /** The IME appears on the virtual display itself, next to the app requesting it. */
+        public static final int DISPLAY_IME_POLICY_LOCAL = 0;
+        /** The IME appears on the phone default display (the platform default for a virtual display). */
+        public static final int DISPLAY_IME_POLICY_FALLBACK_DISPLAY = 1;
+        /** The IME never appears for windows on the virtual display (soft input is fully disabled there). */
+        public static final int DISPLAY_IME_POLICY_HIDE = 2;
+
+        /**
+         * The default is {@link #DISPLAY_IME_POLICY_LOCAL}, not the platform default ({@code FALLBACK_DISPLAY}): the head unit
+         * is the only screen the user interacts with, so an IME popping up on the phone display would make text input from
+         * the car impossible.
+         */
+        public static final int DEFAULT_DISPLAY_IME_POLICY = DISPLAY_IME_POLICY_LOCAL;
+
         private final int width;
         private final int height;
         private final int densityDpi;
@@ -79,6 +95,7 @@ public final class CarLinkServer {
         private final float maxFps;
         private final int iFrameIntervalSec;
         private final int videoPort;
+        private final int displayImePolicy;
 
         private Config(Builder builder) {
             this.width = builder.width;
@@ -89,6 +106,7 @@ public final class CarLinkServer {
             this.maxFps = builder.maxFps;
             this.iFrameIntervalSec = builder.iFrameIntervalSec;
             this.videoPort = builder.videoPort;
+            this.displayImePolicy = builder.displayImePolicy;
         }
 
         public int getWidth() {
@@ -123,6 +141,10 @@ public final class CarLinkServer {
             return videoPort;
         }
 
+        public int getDisplayImePolicy() {
+            return displayImePolicy;
+        }
+
         public static final class Builder {
             private final int width;
             private final int height;
@@ -133,6 +155,7 @@ public final class CarLinkServer {
             private float maxFps = DEFAULT_MAX_FPS;
             private int iFrameIntervalSec = DEFAULT_I_FRAME_INTERVAL_SEC;
             private int videoPort = DEFAULT_VIDEO_PORT;
+            private int displayImePolicy = DEFAULT_DISPLAY_IME_POLICY;
 
             /**
              * @param width      the width of the car head unit screen, in pixels (mandatory)
@@ -189,6 +212,24 @@ public final class CarLinkServer {
                     throw new IllegalArgumentException("Invalid video port: " + videoPort);
                 }
                 this.videoPort = videoPort;
+                return this;
+            }
+
+            /**
+             * Set where the IME is shown when an input field of an app on the virtual display gains focus: one of
+             * {@link Config#DISPLAY_IME_POLICY_LOCAL}, {@link Config#DISPLAY_IME_POLICY_FALLBACK_DISPLAY} or
+             * {@link Config#DISPLAY_IME_POLICY_HIDE}. See {@link Config#DEFAULT_DISPLAY_IME_POLICY} for the default.
+             * <p>
+             * Note: the policy is applied via {@code WindowManagerService.setDisplayImePolicy()}, which requires a trusted
+             * virtual display; it is therefore ignored below Android 13 (the virtual display cannot be trusted there).
+             */
+            public Builder displayImePolicy(int displayImePolicy) {
+                if (displayImePolicy != DISPLAY_IME_POLICY_LOCAL
+                        && displayImePolicy != DISPLAY_IME_POLICY_FALLBACK_DISPLAY
+                        && displayImePolicy != DISPLAY_IME_POLICY_HIDE) {
+                    throw new IllegalArgumentException("Invalid display IME policy: " + displayImePolicy);
+                }
+                this.displayImePolicy = displayImePolicy;
                 return this;
             }
 
@@ -335,6 +376,7 @@ public final class CarLinkServer {
         args.add("video_bit_rate=" + config.getBitRate());
         args.add("video_codec=" + config.getCodec());
         args.add("send_frame_meta=true");
+        args.add("display_ime_policy=" + displayImePolicyArg(config.getDisplayImePolicy()));
         if (config.getMaxFps() > 0) {
             args.add("max_fps=" + config.getMaxFps());
         }
@@ -342,6 +384,21 @@ public final class CarLinkServer {
             args.add("i_frame_interval=" + config.getIFrameIntervalSec());
         }
         return Options.parse(args.toArray(new String[0]));
+    }
+
+    /** Map a {@link Config} DISPLAY_IME_POLICY_* value to the {@code display_ime_policy} option value. */
+    private static String displayImePolicyArg(int displayImePolicy) {
+        switch (displayImePolicy) {
+            case Config.DISPLAY_IME_POLICY_LOCAL:
+                return "local";
+            case Config.DISPLAY_IME_POLICY_FALLBACK_DISPLAY:
+                return "fallback";
+            case Config.DISPLAY_IME_POLICY_HIDE:
+                return "hide";
+            default:
+                // Unreachable: Config.Builder validates the value
+                throw new AssertionError("Invalid display IME policy: " + displayImePolicy);
+        }
     }
 
     private void startSession() {

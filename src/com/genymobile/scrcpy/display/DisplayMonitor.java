@@ -120,8 +120,16 @@ public class DisplayMonitor {
         DisplayInfo di = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
         if (di == null) {
             Ln.w("DisplayInfo for " + displayId + " cannot be retrieved");
-            // We can't compare with the current properties, so reset unconditionally
+            // We can't compare with the current properties, so reset on the transition to the unknown state
             DisplayProperties oldProps = getAndSetDisplayProperties(null); // exchange with synchronization
+            if (oldProps == null) {
+                // The properties were already unknown: coalesce repeated events while the display info remains unavailable,
+                // so that a burst of unrelated configuration events does not restart the encoder again and again
+                if (Ln.isEnabled(Ln.Level.VERBOSE)) {
+                    Ln.v("DisplayMonitor: (unknown) -> (unknown)");
+                }
+                return;
+            }
             if (Ln.isEnabled(Ln.Level.VERBOSE)) {
                 Ln.v("DisplayMonitor: " + oldProps + " -> (unknown)");
             }
