@@ -21,6 +21,7 @@ import com.genymobile.scrcpy.wrappers.ServiceManager;
 import android.graphics.Rect;
 import android.hardware.display.VirtualDisplay;
 import android.os.Build;
+import android.view.Display;
 import android.view.Surface;
 
 import java.io.IOException;
@@ -243,6 +244,12 @@ public class NewDisplayCapture extends SurfaceCapture {
             setCurrentVirtualDisplay(vd); // used for client resize
             int virtualDisplayId = vd.getDisplay().getDisplayId();
             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
+
+            // The car session turns the phone panel off, which makes the device doze; a newly created virtual
+            // display follows the device into OFF state and the projected image would freeze. Force it on.
+            if (Build.VERSION.SDK_INT >= AndroidVersions.API_35_ANDROID_15) {
+                ServiceManager.getDisplayManager().requestDisplayPowerState(virtualDisplayId, Display.STATE_ON);
+            }
 
             if (displayImePolicy != -1) {
                 if (Build.VERSION.SDK_INT >= AndroidVersions.API_33_ANDROID_13) {

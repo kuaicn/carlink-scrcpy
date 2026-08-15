@@ -205,6 +205,21 @@ public final class DisplayManager {
         }
     }
 
+    /**
+     * Requests an explicit display power state (e.g. {@link Display#STATE_ON}), unlike
+     * {@link #requestDisplayPower(int, boolean)} which only maps to STATE_UNKNOWN/STATE_OFF.
+     */
+    @TargetApi(AndroidVersions.API_35_ANDROID_15)
+    public boolean requestDisplayPowerState(int displayId, int state) {
+        try {
+            Method method = getRequestDisplayPowerMethod();
+            return (boolean) method.invoke(manager, displayId, state);
+        } catch (Throwable e) {
+            Ln.e("Could not invoke method", e);
+            return false;
+        }
+    }
+
     public DisplayListenerHandle registerDisplayListener(DisplayListener listener, Handler handler) {
         try {
             Class<?> displayListenerClass = Class.forName("android.hardware.display.DisplayManager$DisplayListener");
