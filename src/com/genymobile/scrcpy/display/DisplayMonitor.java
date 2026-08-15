@@ -57,8 +57,8 @@ public class DisplayMonitor {
                     try {
                         checkDisplayPropertiesChanged();
                     } catch (Throwable e) {
+                        // In-process hosting: never rethrow, it would escape on this listener HandlerThread and kill the host app
                         Ln.e("DisplayMonitor error", e);
-                        throw e;
                     }
                 }
             }, handler);
@@ -74,8 +74,8 @@ public class DisplayMonitor {
                         try {
                             checkDisplayPropertiesChanged();
                         } catch (Throwable e) {
+                            // In-process hosting: never rethrow, an Error would escape on the Binder thread and kill the host app
                             Ln.e("DisplayMonitor error", e);
-                            throw e;
                         }
                     }
                 }

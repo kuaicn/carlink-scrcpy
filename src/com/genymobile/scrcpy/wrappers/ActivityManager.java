@@ -1,29 +1,20 @@
 package com.genymobile.scrcpy.wrappers;
 
-import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.util.AppContext;
 import com.genymobile.scrcpy.util.Ln;
 
 import android.annotation.SuppressLint;
-import android.annotation.TargetApi;
-import android.content.IContentProvider;
 import android.content.Intent;
-import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IInterface;
-import android.os.Process;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 @SuppressLint("PrivateApi,DiscouragedPrivateApi")
 public final class ActivityManager {
 
     private final IInterface manager;
-    private Method getContentProviderExternalMethod;
-    private boolean getContentProviderExternalMethodNewVersion = true;
-    private Method removeContentProviderExternalMethod;
     private Method startActivityAsUserMethod;
     private Method forceStopPackageMethod;
     private Method broadcastIntentMethod;
@@ -43,72 +34,6 @@ public final class ActivityManager {
 
     private ActivityManager(IInterface manager) {
         this.manager = manager;
-    }
-
-    private Method getGetContentProviderExternalMethod() throws NoSuchMethodException {
-        if (getContentProviderExternalMethod == null) {
-            try {
-                getContentProviderExternalMethod = manager.getClass()
-                        .getMethod("getContentProviderExternal", String.class, int.class, IBinder.class, String.class);
-            } catch (NoSuchMethodException e) {
-                // old version
-                getContentProviderExternalMethod = manager.getClass().getMethod("getContentProviderExternal", String.class, int.class, IBinder.class);
-                getContentProviderExternalMethodNewVersion = false;
-            }
-        }
-        return getContentProviderExternalMethod;
-    }
-
-    private Method getRemoveContentProviderExternalMethod() throws NoSuchMethodException {
-        if (removeContentProviderExternalMethod == null) {
-            removeContentProviderExternalMethod = manager.getClass().getMethod("removeContentProviderExternal", String.class, IBinder.class);
-        }
-        return removeContentProviderExternalMethod;
-    }
-
-    @TargetApi(AndroidVersions.API_29_ANDROID_10)
-    public IContentProvider getContentProviderExternal(String name, IBinder token) {
-        try {
-            Method method = getGetContentProviderExternalMethod();
-            Object[] args;
-            if (getContentProviderExternalMethodNewVersion) {
-                // new version
-                args = new Object[]{name, Process.ROOT_UID, token, null};
-            } else {
-                // old version
-                args = new Object[]{name, Process.ROOT_UID, token};
-            }
-            // ContentProviderHolder providerHolder = getContentProviderExternal(...);
-            Object providerHolder = method.invoke(manager, args);
-            if (providerHolder == null) {
-                return null;
-            }
-            // IContentProvider provider = providerHolder.provider;
-            Field providerField = providerHolder.getClass().getDeclaredField("provider");
-            providerField.setAccessible(true);
-            return (IContentProvider) providerField.get(providerHolder);
-        } catch (ReflectiveOperationException e) {
-            Ln.e("Could not invoke method", e);
-            return null;
-        }
-    }
-
-    void removeContentProviderExternal(String name, IBinder token) {
-        try {
-            Method method = getRemoveContentProviderExternalMethod();
-            method.invoke(manager, name, token);
-        } catch (ReflectiveOperationException e) {
-            Ln.e("Could not invoke method", e);
-        }
-    }
-
-    public ContentProvider createSettingsProvider() {
-        IBinder token = new Binder();
-        IContentProvider provider = getContentProviderExternal("settings", token);
-        if (provider == null) {
-            return null;
-        }
-        return new ContentProvider(this, provider, "settings", token);
     }
 
     private Method getStartActivityAsUserMethod() throws NoSuchMethodException, ClassNotFoundException {

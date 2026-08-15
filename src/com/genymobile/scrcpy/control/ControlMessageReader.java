@@ -92,6 +92,11 @@ public class ControlMessageReader {
 
     private byte[] parseByteArray(int sizeBytes) throws IOException {
         int len = parseBufferLength(sizeBytes);
+        // The length is read from up to 4 bytes sent by the peer, so it could request an allocation of up to 4GB for a single
+        // message: refuse anything beyond the protocol message max size before allocating (len is >= 0 by construction)
+        if (len > MESSAGE_MAX_SIZE) {
+            throw new ControlProtocolException("Buffer length exceeds message max size: " + len);
+        }
         byte[] data = new byte[len];
         dis.readFully(data);
         return data;

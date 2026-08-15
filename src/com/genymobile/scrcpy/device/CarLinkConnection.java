@@ -23,8 +23,8 @@ import java.net.SocketException;
 public final class CarLinkConnection implements Closeable {
 
     private final Socket videoSocket;
-    // Wraps the video socket fd so that Streamer can keep using the Os.write() path.
-    // Closing it closes the underlying socket fd, so it must be closed before the Socket itself.
+    // Dup of the video socket fd (ParcelFileDescriptor.fromSocket() dup()s it) so that Streamer can keep using the Os.write() path.
+    // It owns an fd independent from the socket, so it must be closed in addition to the Socket itself.
     private final ParcelFileDescriptor videoPfd;
 
     private final Socket controlSocket;
@@ -41,8 +41,23 @@ public final class CarLinkConnection implements Closeable {
             throw new IOException(e);
         }
 
-        videoPfd = ParcelFileDescriptor.fromSocket(videoSocket);
-        controlChannel = new ControlChannel(controlSocket.getInputStream(), controlSocket.getOutputStream());
+        ParcelFileDescriptor pfd = ParcelFileDescriptor.fromSocket(videoSocket);
+        if (pfd == null) {
+            // fromSocket() returns null if the socket has no fd (i.e. it is not connected)
+            throw new IOException("Video socket is not connected");
+        }
+        try {
+            controlChannel = new ControlChannel(controlSocket.getInputStream(), controlSocket.getOutputStream());
+        } catch (IOException | RuntimeException e) {
+            // Do not leak the dup'ed fd if the control channel setup fails
+            try {
+                pfd.close();
+            } catch (IOException closeException) {
+                // ignore
+            }
+            throw e;
+        }
+        videoPfd = pfd;
     }
 
     public FileDescriptor getVideoFd() {

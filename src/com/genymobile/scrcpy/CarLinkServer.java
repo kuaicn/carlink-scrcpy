@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * CarLink entry point: runs the scrcpy capture/encode/inject pipeline in-process, inside the hosting privapp (the "互联服务").
@@ -224,6 +225,9 @@ public final class CarLinkServer {
     private final HandlerThread sessionThread = new HandlerThread("carlink-scrcpy");
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch terminationLatch = new CountDownLatch(1);
+    // Written by a processor thread terminating with an error (first error wins), read by the session thread to report it via
+    // Listener.onError() before onStopped()
+    private final AtomicReference<Throwable> sessionErrorCause = new AtomicReference<>();
 
     // Only accessed on the session thread (except where noted)
     private CarLinkConnection connection;
@@ -300,7 +304,6 @@ public final class CarLinkServer {
         args.add("new_display=" + config.getWidth() + "x" + config.getHeight() + "/" + config.getDensityDpi());
         args.add("video_bit_rate=" + config.getBitRate());
         args.add("video_codec=" + config.getCodec());
-        args.add("control=true");
         args.add("send_frame_meta=true");
         if (config.getMaxFps() > 0) {
             args.add("max_fps=" + config.getMaxFps());
@@ -370,6 +373,12 @@ public final class CarLinkServer {
 
             // Block until any processor terminates (the peer closed a channel, or a fatal error occurred) or stop() is called
             terminationLatch.await();
+
+            // A processor terminated with an error: report it (onStopped() will follow from the finally block)
+            Throwable cause = sessionErrorCause.get();
+            if (cause != null && running.get()) {
+                reportError("CarLink session terminated unexpectedly", cause);
+            }
         } catch (InterruptedException e) {
             // stop() interrupted the wait; fall through to the cleanup
             Thread.currentThread().interrupt();
@@ -393,7 +402,9 @@ public final class CarLinkServer {
         videoServerSocket.setSoTimeout(VIDEO_ACCEPT_POLL_MS);
         while (running.get()) {
             try {
-                return videoServerSocket.accept();
+                Socket socket = videoServerSocket.accept();
+                Ln.i("Video connection accepted from " + socket.getRemoteSocketAddress() + " on port " + socket.getLocalPort());
+                return socket;
             } catch (SocketTimeoutException e) {
                 if (isControlSocketDead()) {
                     Ln.w("Control channel closed while waiting for the video connection; ending session");
@@ -427,6 +438,13 @@ public final class CarLinkServer {
             } catch (IOException closeException) {
                 // ignore
             }
+            // The control socket was handed over to the library by start(): close it too, since terminate() cannot do it via
+            // connection.close() (the connection was never created)
+            try {
+                controlSocket.close();
+            } catch (IOException closeException) {
+                // ignore
+            }
             throw e;
         }
 
@@ -451,7 +469,13 @@ public final class CarLinkServer {
         // Both processors always report termination as "fatal": any of them stopping ends the whole session
         // (this is the upstream Completion semantics, simplified: the first termination wins)
         for (AsyncProcessor asyncProcessor : asyncProcessors) {
-            asyncProcessor.start((fatalError) -> terminationLatch.countDown());
+            asyncProcessor.start((fatalError, cause) -> {
+                if (cause != null) {
+                    // Reported via Listener.onError() by the session thread once it wakes up
+                    sessionErrorCause.compareAndSet(null, cause);
+                }
+                terminationLatch.countDown();
+            });
         }
     }
 
@@ -479,19 +503,35 @@ public final class CarLinkServer {
             connection.shutdown();
         }
 
-        try {
-            for (AsyncProcessor asyncProcessor : asyncProcessors) {
+        // Join every processor even if this thread carries an interrupted status (stop() interrupts the session thread): a single
+        // interrupted join() must not skip the remaining joins and the OpenGLRunner shutdown
+        boolean interrupted = Thread.interrupted(); // clear the status so that join() actually waits
+        for (AsyncProcessor asyncProcessor : asyncProcessors) {
+            try {
                 asyncProcessor.join();
+            } catch (InterruptedException e) {
+                interrupted = true;
             }
-
+        }
+        try {
             OpenGLRunner.shutdown();
         } catch (InterruptedException e) {
-            // ignore
+            interrupted = true;
+        }
+        if (interrupted) {
             Thread.currentThread().interrupt();
         }
 
         if (connection != null) {
             connection.close();
+        } else {
+            // The session ended before the connection was created (e.g. aborted while waiting for the video channel): the
+            // control socket handed over to start() must still be closed (idempotent if startProcessors() already closed it)
+            try {
+                controlSocket.close();
+            } catch (IOException e) {
+                // ignore
+            }
         }
         try {
             videoServerSocket.close();

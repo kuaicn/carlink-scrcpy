@@ -50,11 +50,7 @@ public final class ControlMessage {
     private boolean paste;
     private int repeat;
     private long sequence;
-    private int id;
-    private byte[] data;
     private boolean on;
-    private int vendorId;
-    private int productId;
     private int width;
     private int height;
 
@@ -230,24 +226,8 @@ public final class ControlMessage {
         return sequence;
     }
 
-    public int getId() {
-        return id;
-    }
-
-    public byte[] getData() {
-        return data;
-    }
-
     public boolean getOn() {
         return on;
-    }
-
-    public int getVendorId() {
-        return vendorId;
-    }
-
-    public int getProductId() {
-        return productId;
     }
 
     public int getWidth() {

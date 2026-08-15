@@ -237,19 +237,6 @@ public class AffineMatrix {
     }
 
     /**
-     * Return a scaling matrix.
-     *
-     * @param from the source size
-     * @param to   the destination size
-     * @return the matrix
-     */
-    public static AffineMatrix scale(Size from, Size to) {
-        double scaleX = (double) to.getWidth() / from.getWidth();
-        double scaleY = (double) to.getHeight() / from.getHeight();
-        return scale(scaleX, scaleY);
-    }
-
-    /**
      * Return a matrix applying a "reframing" (cropping a rectangle).
      * <p/>
      * <code>(x, y)</code> is the bottom-left corner, <code>(w, h)</code> is the size of the rectangle.
@@ -298,15 +285,6 @@ public class AffineMatrix {
      */
     public static AffineMatrix hflip() {
         return new AffineMatrix(-1, 0, 0, 1, 1, 0);
-    }
-
-    /**
-     * Return a vertical flip matrix.
-     *
-     * @return the matrix
-     */
-    public static AffineMatrix vflip() {
-        return new AffineMatrix(1, 0, 0, -1, 0, 1);
     }
 
     /**

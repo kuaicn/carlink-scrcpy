@@ -1,6 +1,7 @@
 package com.genymobile.scrcpy.opengl;
 
 import com.genymobile.scrcpy.model.Size;
+import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.Threads;
 
 import android.graphics.SurfaceTexture;
@@ -21,6 +22,9 @@ import java.util.concurrent.Semaphore;
 
 public final class OpenGLRunner {
 
+    // Bounded join() on shutdown()
+    private static final long JOIN_TIMEOUT_MS = 2000;
+
     private static HandlerThread handlerThread;
     private static Handler handler;
 
@@ -30,6 +34,9 @@ public final class OpenGLRunner {
 
     private final OpenGLFilter filter;
     private final float[] overrideTransformMatrix;
+    // Reused across frames when no override matrix is set (render() always runs on the GL thread);
+    // SurfaceTexture.getTransformMatrix() fully overwrites all 16 elements on every call
+    private final float[] transformMatrix = new float[16];
 
     private SurfaceTexture surfaceTexture;
     private Surface inputSurface;
@@ -58,10 +65,18 @@ public final class OpenGLRunner {
         HandlerThread thread;
         synchronized (OpenGLRunner.class) {
             thread = handlerThread;
+            // Reset so that a later session creates a fresh thread (a quit thread would silently drop posted runnables)
+            handlerThread = null;
+            handler = null;
         }
         if (thread != null) {
             thread.quitSafely();
-            thread.join();
+            // Bounded wait: a stuck GL task must not block the session teardown forever (the quit thread exits on its own
+            // once its queue is drained)
+            thread.join(JOIN_TIMEOUT_MS);
+            if (thread.isAlive()) {
+                Ln.e("OpenGLRunner thread did not terminate within " + JOIN_TIMEOUT_MS + "ms, giving up");
+            }
         }
     }
 
@@ -147,34 +162,60 @@ public final class OpenGLRunner {
             throw new OpenGLException("Failed to make EGL context current");
         }
 
-        int[] textures = new int[1];
-        GLES20.glGenTextures(1, textures, 0);
-        GLUtils.checkGlError();
-        textureId = textures[0];
+        try {
+            int[] textures = new int[1];
+            GLES20.glGenTextures(1, textures, 0);
+            GLUtils.checkGlError();
+            textureId = textures[0];
 
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-        GLUtils.checkGlError();
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-        GLUtils.checkGlError();
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-        GLUtils.checkGlError();
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-        GLUtils.checkGlError();
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLUtils.checkGlError();
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLUtils.checkGlError();
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLUtils.checkGlError();
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+            GLUtils.checkGlError();
 
-        surfaceTexture = new SurfaceTexture(textureId);
-        surfaceTexture.setDefaultBufferSize(inputSize.getWidth(), inputSize.getHeight());
-        inputSurface = new Surface(surfaceTexture);
+            surfaceTexture = new SurfaceTexture(textureId);
+            surfaceTexture.setDefaultBufferSize(inputSize.getWidth(), inputSize.getHeight());
+            inputSurface = new Surface(surfaceTexture);
 
-        filter.init();
+            filter.init();
 
-        surfaceTexture.setOnFrameAvailableListener(surfaceTexture -> {
-            if (stopped) {
-                // Make sure to never render after resources have been released
-                return;
+            surfaceTexture.setOnFrameAvailableListener(surfaceTexture -> {
+                if (stopped) {
+                    // Make sure to never render after resources have been released
+                    return;
+                }
+
+                try {
+                    render(outputSize);
+                } catch (Throwable t) {
+                    // In-process hosting: never let an exception escape on this Handler thread, it would kill the host app
+                    Ln.e("OpenGL render error", t);
+                }
+            }, handler);
+        } catch (Throwable t) {
+            // Clean up the partially initialized GL state: on a start() failure the caller never gets a usable runner,
+            // so stopAndRelease() will never be called to release these resources
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+            EGL14.eglDestroySurface(eglDisplay, eglSurface);
+            EGL14.eglDestroyContext(eglDisplay, eglContext);
+            EGL14.eglTerminate(eglDisplay);
+            eglDisplay = EGL14.EGL_NO_DISPLAY;
+            eglContext = EGL14.EGL_NO_CONTEXT;
+            eglSurface = EGL14.EGL_NO_SURFACE;
+            if (surfaceTexture != null) {
+                surfaceTexture.release();
+                surfaceTexture = null;
             }
-
-            render(outputSize);
-        }, handler);
+            if (inputSurface != null) {
+                inputSurface.release();
+                inputSurface = null;
+            }
+            throw t;
+        }
     }
 
     private void render(Size outputSize) {
@@ -187,7 +228,7 @@ public final class OpenGLRunner {
         if (overrideTransformMatrix != null) {
             matrix = overrideTransformMatrix;
         } else {
-            matrix = new float[16];
+            matrix = transformMatrix;
             surfaceTexture.getTransformMatrix(matrix);
         }
 
@@ -200,27 +241,48 @@ public final class OpenGLRunner {
     public void stopAndRelease() {
         final Semaphore sem = new Semaphore(0);
 
-        handler.post(() -> {
-            stopped = true;
-            surfaceTexture.setOnFrameAvailableListener(null, handler);
+        // Snapshot the static field: shutdown() resets it, and posting to a quit Looper would silently drop the runnable,
+        // making the semaphore wait below block forever
+        Handler currentHandler = handler;
+        if (currentHandler == null) {
+            Ln.w("OpenGLRunner already shut down, GL resources not released");
+            return;
+        }
 
-            filter.release();
+        boolean posted = currentHandler.post(() -> {
+            try {
+                stopped = true;
+                surfaceTexture.setOnFrameAvailableListener(null, handler);
 
-            int[] textures = {textureId};
-            GLES20.glDeleteTextures(1, textures, 0);
-            GLUtils.checkGlError();
+                filter.release();
 
-            EGL14.eglDestroySurface(eglDisplay, eglSurface);
-            EGL14.eglDestroyContext(eglDisplay, eglContext);
-            EGL14.eglTerminate(eglDisplay);
-            eglDisplay = EGL14.EGL_NO_DISPLAY;
-            eglContext = EGL14.EGL_NO_CONTEXT;
-            eglSurface = EGL14.EGL_NO_SURFACE;
-            surfaceTexture.release();
-            inputSurface.release();
+                int[] textures = {textureId};
+                GLES20.glDeleteTextures(1, textures, 0);
+                GLUtils.checkGlError();
 
-            sem.release();
+                EGL14.eglDestroySurface(eglDisplay, eglSurface);
+                EGL14.eglDestroyContext(eglDisplay, eglContext);
+                EGL14.eglTerminate(eglDisplay);
+                eglDisplay = EGL14.EGL_NO_DISPLAY;
+                eglContext = EGL14.EGL_NO_CONTEXT;
+                eglSurface = EGL14.EGL_NO_SURFACE;
+                surfaceTexture.release();
+                inputSurface.release();
+            } catch (Throwable t) {
+                // In-process hosting: never let an exception escape on this Handler thread, it would kill the host app
+                // (this also covers a partially initialized runner left over by a failed start())
+                Ln.e("Could not release OpenGL resources", t);
+            } finally {
+                // Always release the caller, even on failure, to avoid blocking it forever
+                sem.release();
+            }
         });
+
+        if (!posted) {
+            // The Looper is already gone, the runnable would never run: do not wait on the semaphore forever
+            Ln.w("OpenGLRunner thread is shutting down, GL resources not released");
+            return;
+        }
 
         try {
             sem.acquire();

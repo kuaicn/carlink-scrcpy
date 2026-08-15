@@ -9,10 +9,6 @@ public final class Binary {
         return value & 0xffff;
     }
 
-    public static int toUnsigned(byte value) {
-        return value & 0xff;
-    }
-
     /**
      * Convert unsigned 16-bit fixed-point to a float between 0 and 1
      *

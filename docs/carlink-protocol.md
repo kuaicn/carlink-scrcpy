@@ -7,6 +7,7 @@
 本仓库 `docs/` 下保留的 5 篇文档（`control.md`、`video.md`、`device.md`、`virtual-display.md`、`develop.md`）是上游 scrcpy v4.1 的**用户向功能文档**，其中大量内容不适用于本项目：
 
 - 它们描述的命令行参数、adb 隧道（`--tunnel-forward`）、音频（`--audio-*`）、摄像头（`--camera-*`）、UHID 键鼠（`--mouse=uhid`/`--keyboard=uhid`）、OTG 等特性在本项目中**已删除或不生效**；
+- 它们相互之间的交叉链接（如 `keyboard.md`、`mouse.md`、`camera.md`、`audio.md`、`shortcuts.md`、`recording.md` 等）指向**未保留**的文档，链接失效属预期；
 - 上游 client/server 之间经 adb 隧道承载 abstract LocalSocket，本项目已改为**纯 TCP**；
 - 上游视频流开头的 64 字节设备名 meta、tunnel-forward 的 1 字节 dummy byte、session meta 包，本项目**一律不发送**（详见下文「视频通道」）；
 - 其中对**控制消息/视频包 wire 格式**的描述仍可作为背景参考，但与本文档冲突时，**以本文档为准**（本文档与 `src/` 下代码逐一核对过）。
@@ -46,7 +47,7 @@
 
 | 字段 | 含义 |
 |---|---|
-| `width` / `height` | 车机屏幕物理分辨率（像素）。手机将**原样**以此创建 VirtualDisplay 并作为编码尺寸 |
+| `width` / `height` | 车机屏幕物理分辨率（像素）。手机以此创建 VirtualDisplay 并作为编码尺寸；仅当编码器要求更粗的尺寸对齐时，先**向下**对齐到其对齐倍数（对齐值 ≤16 时 1920x720 等常见尺寸不变），此时虚拟屏/视频尺寸以对齐后的值为准 |
 | `dpi` | 车机屏幕密度 |
 | `codecs` | 车机支持的视频 codec 列表，按偏好排序；取值 `"h264"`、`"h265"` |
 
@@ -61,7 +62,13 @@
 | `codec` | 手机从 `codecs` 中选定的 codec（`"h264"` 或 `"h265"`） |
 | `videoPort` | 视频通道 TCP 端口。手机侧已绑定监听，车机应**立即连接** |
 
-握手失败（JSON 非法、尺寸/dpi 非法、`codecs` 为空或无交集等）：手机直接关闭连接。
+握手失败（JSON 非法、尺寸/dpi 非法、`codecs` 为空或无交集等）：手机直接关闭连接；也可以先发一帧 `error` 再关闭：
+
+```json
+{"type":"error","reason":"busy"}
+```
+
+`reason` 取值：`busy`（已有会话在进行）、`no_common_codec`（codec 无交集）、`invalid_display`（尺寸/dpi 非法）。车机端必须同时兼容两种拒绝方式（无帧直接关闭 / `error` 帧）。
 
 ### 3. 握手后
 
@@ -115,7 +122,7 @@
 |---|---|---|---|
 | 0 | INJECT_KEYCODE | u8 action, s32 keycode, s32 repeat, s32 metaState | 注入按键到虚拟屏 |
 | 1 | INJECT_TEXT | u32 len + UTF-8 | 文本输入（经 KeyCharacterMap 转为按键序列） |
-| 2 | INJECT_TOUCH_EVENT | u8 action, s64 pointerId, s32 x, s32 y, u16 screenW, u16 screenH, u16 pressure, s32 actionButton, s32 buttons | **车机触控主消息**。坐标系为车机屏幕（即 `screenW`×`screenH`，须与 hello 上报一致）；`pointerId`：单指触控可用任意稳定 id（多点时每指一个 id）；`pressure` 为 u16 定点（0xFFFF=1.0，UP 事件为 0） |
+| 2 | INJECT_TOUCH_EVENT | u8 action, s64 pointerId, s32 x, s32 y, u16 screenW, u16 screenH, u16 pressure, s32 actionButton, s32 buttons | **车机触控主消息**。坐标系为视频像素（`screenW`×`screenH` 必须等于服务端**当前视频尺寸**——即解码器上报的可见尺寸；无对齐裁剪时等于 hello 上报值，不等于时服务端静默丢弃该事件）；`pointerId`：单指触控可用任意稳定 id（多点时每指一个 id）；`pressure` 为 u16 定点（0xFFFF=1.0，UP 事件为 0） |
 | 3 | INJECT_SCROLL_EVENT | s32 x, s32 y, u16 screenW, u16 screenH, s16 hScroll, s16 vScroll, s32 buttons | 滚轮/滚动；滚动量为 i16 定点（满量程 ±16） |
 | 4 | BACK_OR_SCREEN_ON | u8 action | 虚拟屏亮着→注入 BACK；否则注入 POWER 点亮 |
 | 5 | EXPAND_NOTIFICATION_PANEL | 无 | 展开通知栏 |
@@ -130,9 +137,9 @@
 | 17 | RESET_VIDEO | 无 | 请求重建编码会话（下一帧为 IDR） |
 | 22 | SCAN_FILE | u32 len + UTF-8 path | 触发 MediaStore 扫描 |
 
-**不支持的消息（车机端不得发送）**：type 18/19/20（CAMERA_*，本项目无摄像头）、type 21（RESIZE_DISPLAY，仅上游 flex display 支持，本项目为固定尺寸虚拟屏）。发送不支持或未知类型的消息会导致手机端结束会话。
+**不支持的消息（车机端不得发送）**：type 18/19/20（CAMERA_*，本项目无摄像头）、type 21（RESIZE_DISPLAY，仅上游 flex display 模式支持，本项目会话为固定尺寸虚拟屏）。这些**已定义但不受支持**的消息会被手机端解析后丢弃（仅记录日志，会话继续）；只有**未定义的消息类型或非法长度字段**（协议错误）才会导致手机端结束会话。带长度前缀的字段（INJECT_TEXT、SET_CLIPBOARD、SCAN_FILE 等）长度上限为 **256 KiB**（服务端 `MESSAGE_MAX_SIZE`），超限即协议错误。
 
-触控注入目标是手机按 hello 参数创建的 VirtualDisplay，不是手机物理屏；坐标无需车机端做额外缩放（虚拟屏尺寸 = 车机屏幕尺寸）。
+触控注入目标是手机按 hello 参数创建的 VirtualDisplay，不是手机物理屏；坐标无需车机端做额外缩放（虚拟屏尺寸 = 视频尺寸，通常等于车机屏幕尺寸，差异仅来自上述编码器对齐的向下取整）。
 
 ## 四、device 消息（手机 → 车机，控制通道反方向）
 

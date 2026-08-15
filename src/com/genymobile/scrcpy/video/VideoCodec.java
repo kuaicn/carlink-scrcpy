@@ -24,11 +24,6 @@ public enum VideoCodec implements Codec {
     }
 
     @Override
-    public Type getType() {
-        return Type.VIDEO;
-    }
-
-    @Override
     public int getId() {
         return id;
     }

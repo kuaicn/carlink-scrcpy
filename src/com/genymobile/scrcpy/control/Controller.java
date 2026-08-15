@@ -42,7 +42,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     /*
      * For event injection, there are two display ids:
-     *  - the displayId passed to the constructor (which comes from --display-id passed by the client, 0 for the main display);
+     *  - the displayId passed to the constructor (which comes from the display_id option, 0 for the main display);
      *  - the virtualDisplayId used for mirroring, notified by the capture instance via the VirtualDisplayListener interface.
      *
      * (In case the ScreenCapture uses the "SurfaceControl API", then both ids are equals, but this is an implementation detail.)
@@ -51,8 +51,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
      *  - virtualDisplayId must be used for events relative to the display (mouse and touch events with coordinates);
      *  - displayId must be used for other events (like key events).
      *
-     * If a new separate virtual display is created (using --new-display), then displayId == Device.DISPLAY_ID_NONE. In that case, all events are
-     * sent to the virtual display id.
+     * If a new separate virtual display is created (new_display option), then displayId == Device.DISPLAY_ID_NONE. In that case, all events are
+     * sent to the virtual display id. CarLinkServer always sets new_display, so this is the only case in practice for this library.
      */
 
     private static final class DisplayData {
@@ -73,8 +73,15 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     // Interval between simulated user activity events
     private static final long KEEP_ACTIVE_INTERVAL_MS = 4000;
 
-    private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor();
-    private ExecutorService startAppExecutor;
+    private static final long JOIN_TIMEOUT_MS = 2000;
+
+    private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "display-power-off");
+        thread.setDaemon(true);
+        return thread;
+    });
+    // Written by the control thread, read by stop() on the session thread
+    private volatile ExecutorService startAppExecutor;
 
     private Thread thread;
     private Thread keepActiveThread;
@@ -91,10 +98,16 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private final AtomicBoolean isSettingClipboard = new AtomicBoolean();
 
+    // Registered on the system clipboard service (statically cached by ServiceManager), which outlives the session: it must be
+    // unregistered on stop(), otherwise one listener per session would accumulate and keep calling back into dead sessions
+    private android.content.ClipboardManager.OnPrimaryClipChangedListener clipboardAutosyncListener;
+
     private final AtomicReference<DisplayData> displayData = new AtomicReference<>();
     private final Object displayDataAvailable = new Object(); // condition variable
 
     private long lastTouchDown;
+    private boolean firstTouchInjected;
+    private boolean touchInjectionFailureLogged;
     private final PointersState pointersState = new PointersState();
     private final MotionEvent.PointerProperties[] pointerProperties = new MotionEvent.PointerProperties[PointersState.MAX_POINTERS];
     private final MotionEvent.PointerCoords[] pointerCoords = new MotionEvent.PointerCoords[PointersState.MAX_POINTERS];
@@ -124,19 +137,26 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         // session thread here.
         ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
         if (clipboardAutosync) {
-            // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
+            // If autosync is enabled, synchronize the Android clipboard to the head unit automatically
             if (clipboardManager != null) {
-                clipboardManager.addPrimaryClipChangedListener(() -> {
-                    if (isSettingClipboard.get()) {
-                        // This is a notification for the change we are currently applying, ignore it
-                        return;
+                clipboardAutosyncListener = () -> {
+                    try {
+                        if (isSettingClipboard.get()) {
+                            // This is a notification for the change we are currently applying, ignore it
+                            return;
+                        }
+                        String text = Device.getClipboardText();
+                        if (text != null) {
+                            DeviceMessage msg = DeviceMessage.createClipboard(text);
+                            sender.send(msg);
+                        }
+                    } catch (Throwable t) {
+                        // In-process hosting: this listener is dispatched on the app main Looper, never let an exception
+                        // escape, it would kill the hosting app process
+                        Ln.e("Clipboard autosync error", t);
                     }
-                    String text = Device.getClipboardText();
-                    if (text != null) {
-                        DeviceMessage msg = DeviceMessage.createClipboard(text);
-                        sender.send(msg);
-                    }
-                });
+                };
+                clipboardManager.addPrimaryClipChangedListener(clipboardAutosyncListener);
             } else {
                 Ln.w("No clipboard manager, copy-paste between device and computer will not work");
             }
@@ -224,16 +244,19 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
 
         thread = new Thread(() -> {
+            Throwable cause = null;
             try {
                 control();
             } catch (IOException e) {
                 Ln.e("Controller error", e);
+                cause = e;
             } catch (Throwable t) {
                 // In-process hosting: never let an Error escape the thread, it would kill the hosting app process
                 Ln.e("Fatal controller error", t);
+                cause = t;
             } finally {
                 Ln.d("Controller stopped");
-                listener.onTerminated(true);
+                listener.onTerminated(true, cause);
             }
         }, "control-recv");
         thread.start();
@@ -242,11 +265,20 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     @Override
     public void stop() {
+        if (clipboardAutosyncListener != null) {
+            // getClipboardManager() cannot become null once a listener has been registered (the cache is never reset)
+            ServiceManager.getClipboardManager().removePrimaryClipChangedListener(clipboardAutosyncListener);
+            clipboardAutosyncListener = null;
+        }
         if (keepActiveThread != null) {
             keepActiveThread.interrupt();
         }
         if (thread != null) {
             thread.interrupt();
+        }
+        if (startAppExecutor != null) {
+            // Interrupt a pending app start; otherwise its idle pool thread would leak for the rest of the process lifetime
+            startAppExecutor.shutdownNow();
         }
         sender.stop();
     }
@@ -254,7 +286,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     @Override
     public void join() throws InterruptedException {
         if (thread != null) {
-            thread.join();
+            // Bounded wait: a thread stuck despite the socket shutdown must not block the whole session teardown forever
+            thread.join(JOIN_TIMEOUT_MS);
+            if (thread.isAlive()) {
+                Ln.e("Controller thread did not terminate within " + JOIN_TIMEOUT_MS + "ms, giving up");
+            }
         }
         sender.join();
     }
@@ -271,6 +307,17 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             return false;
         }
 
+        try {
+            return handleMessage(msg);
+        } catch (RuntimeException e) {
+            // A message that fails to apply (permission revoked, unexpected capture/display state, MotionEvent rejected...) must not
+            // terminate the whole session: log it and keep processing further messages
+            Ln.e("Could not handle control message (type=" + msg.getType() + ")", e);
+            return true;
+        }
+    }
+
+    private boolean handleMessage(ControlMessage msg) {
         int type = msg.getType();
 
         switch (type) {
@@ -341,6 +388,12 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             case ControlMessage.TYPE_SCAN_FILE:
                 scanFile(msg.getText());
                 return true;
+            case ControlMessage.TYPE_CAMERA_SET_TORCH:
+            case ControlMessage.TYPE_CAMERA_ZOOM_IN:
+            case ControlMessage.TYPE_CAMERA_ZOOM_OUT:
+                // Valid protocol messages parsed by ControlMessageReader, but CarLink has no camera support: drop them
+                // silently instead of hitting the AssertionError below (which would terminate the session)
+                return true;
             default:
                 // fall through
         }
@@ -391,8 +444,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         // it hides the field on purpose, to read it with atomic access
         @SuppressWarnings("checkstyle:HiddenField")
         DisplayData displayData = this.displayData.get();
-        // In scrcpy, displayData should never be null (a touch event can only be generated from the client when a video frame is present).
-        // However, it is possible to send events without video playback when using scrcpy-server alone (except for virtual displays).
+        // A positional event is generated by the head unit from a received video frame, so displayData should never be null here (this
+        // library always mirrors a virtual display, i.e. displayId == Device.DISPLAY_ID_NONE).
         assert displayData != null || displayId != Device.DISPLAY_ID_NONE : "Cannot receive a positional event without a display";
 
         Point point;
@@ -525,7 +578,20 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         MotionEvent event = MotionEvent.obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords, 0, buttons, 1f, 1f,
                 DEFAULT_DEVICE_ID, 0, source, 0);
-        return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
+        if (Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
+            // One-time milestone (the control thread is the only writer): proves the injection path works end to end
+            if (!firstTouchInjected) {
+                firstTouchInjected = true;
+                Ln.i("First touch event injected on display " + targetDisplayId);
+            }
+            return true;
+        }
+        if (!touchInjectionFailureLogged) {
+            // Logged once: a persistently rejected injection must not spam one warning per event
+            touchInjectionFailureLogged = true;
+            Ln.w("Touch event injection rejected by the system");
+        }
+        return false;
     }
 
     private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
@@ -558,8 +624,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
      */
     private static void scheduleDisplayPowerOff(int displayId) {
         EXECUTOR.schedule(() -> {
-            Ln.i("Forcing display off");
-            Device.setDisplayPower(displayId, false);
+            try {
+                Ln.i("Forcing display off");
+                Device.setDisplayPower(displayId, false);
+            } catch (Throwable t) {
+                // Executor tasks silently swallow exceptions into the Future; log it instead
+                Ln.e("Could not power display off", t);
+            }
         }, 200, TimeUnit.MILLISECONDS);
     }
 
@@ -600,7 +671,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             pressReleaseKeycode(key, Device.INJECT_MODE_WAIT_FOR_FINISH);
         }
 
-        // If clipboard autosync is enabled, then the device clipboard is synchronized to the computer clipboard whenever it changes, in
+        // If clipboard autosync is enabled, then the device clipboard is synchronized to the head unit whenever it changes, in
         // particular when COPY or CUT are injected, so it should not be synchronized twice. On Android < 7, do not synchronize at all rather than
         // copying an old clipboard content.
         if (!clipboardAutosync) {
@@ -661,7 +732,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             return displayId;
         }
 
-        // Virtual display created by --new-display, use the virtualDisplayId
+        // Virtual display created via the new_display option, use the virtualDisplayId
         DisplayData data = displayData.get();
         if (data == null) {
             return Device.DISPLAY_ID_NONE;
@@ -672,11 +743,22 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private void startAppAsync(String name) {
         if (startAppExecutor == null) {
-            startAppExecutor = Executors.newSingleThreadExecutor();
+            startAppExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread thread = new Thread(r, "start-app");
+                thread.setDaemon(true);
+                return thread;
+            });
         }
 
         // Listing and selecting the app may take a lot of time
-        startAppExecutor.submit(() -> startApp(name));
+        startAppExecutor.submit(() -> {
+            try {
+                startApp(name);
+            } catch (Throwable t) {
+                // Executor tasks silently swallow exceptions into the Future; log it instead
+                Ln.e("Could not start app \"" + name + "\"", t);
+            }
+        });
     }
 
     private void startApp(String name) {
@@ -727,7 +809,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             return displayId;
         }
 
-        // Mirroring a new virtual display id (using --new-display-id feature)
+        // Mirroring a new virtual display (new_display option)
         try {
             // Wait for at most 1 second until a virtual display id is known
             DisplayData data = waitDisplayData(1000);
@@ -767,7 +849,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         int targetDisplayId = displayId != Device.DISPLAY_ID_NONE ? displayId : 0;
         boolean setDisplayPowerOk = Device.setDisplayPower(targetDisplayId, on);
         if (setDisplayPowerOk) {
-            // Do not keep display power off for virtual displays: MOD+p must wake up the physical device
+            // Do not keep display power off for virtual displays: a later POWER press must wake up the physical device
             keepDisplayPowerOff = displayId != Device.DISPLAY_ID_NONE && !on;
             Ln.i("Device display turned " + (on ? "on" : "off"));
         }

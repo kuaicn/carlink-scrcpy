@@ -55,10 +55,6 @@ public final class IO {
         }
     }
 
-    public static void writeFully(FileDescriptor fd, byte[] buffer, int offset, int len) throws IOException {
-        writeFully(fd, ByteBuffer.wrap(buffer, offset, len));
-    }
-
     public static String toString(InputStream inputStream) {
         StringBuilder builder = new StringBuilder();
         Scanner scanner = new Scanner(inputStream);

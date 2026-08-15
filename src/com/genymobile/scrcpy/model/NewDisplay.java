@@ -20,12 +20,4 @@ public final class NewDisplay {
     public int getDpi() {
         return dpi;
     }
-
-    public boolean hasExplicitSize() {
-        return size != null;
-    }
-
-    public boolean hasExplicitDpi() {
-        return dpi != 0;
-    }
 }

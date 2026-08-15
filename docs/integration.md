@@ -1,6 +1,6 @@
 # ROM 集成指南
 
-本库以 `java_library` 形式编入 Android 系统源码树（AOSP/LineageOS，目标基线 LineageOS 23.2 / Android 16），由平台签名的 privapp「互联服务」通过 `static_libs` 依赖，在其进程内运行。
+本库以 `android_library` 形式编入 Android 系统源码树（AOSP/LineageOS，目标基线 LineageOS 23.2 / Android 16），由平台签名的 privapp「互联服务」通过 `static_libs` 依赖，在其进程内运行。
 
 ## 1. 源码树放置
 
@@ -13,16 +13,14 @@ vendor/carlink/scrcpy/
 仓库根部的 `Android.bp` 已定义模块 `carlink_scrcpy`：
 
 ```bp
-java_library {
+android_library {
     name: "carlink_scrcpy",
     srcs: ["src/**/*.java"],
-    // 树内编译，直接使用 framework（含 hidden API），不走 SDK
-    sdk_version: "none",
-    libs: ["framework"],
+    // sdk_version 缺省 = 直编树内 platform（含 hidden API），与 WindowManager-Shell 同款
 }
 ```
 
-`sdk_version: "none"` + `libs: ["framework"]` 使模块可以使用 `@hide` 的内部 API（本库大量依赖 `android.hardware.display.DisplayManagerGlobal`、`android.view.SurfaceControl` 等内部接口，全部经反射访问，树内编译不受 hidden API 限制）。
+`android_library` 缺省 `sdk_version` 即随树内 platform 编译，可直接引用 `@hide` 的内部 API（与 WindowManager-Shell 等树内模块同款）。本库大量依赖 `android.hardware.display.DisplayManagerGlobal`、`android.view.SurfaceControl` 等内部接口，全部经反射访问，树内编译不受 hidden API 限制。
 
 在互联服务模块中声明依赖：
 

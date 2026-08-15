@@ -50,10 +50,6 @@ public final class Device {
         // not instantiable
     }
 
-    public static String getDeviceName() {
-        return Build.MODEL;
-    }
-
     public static boolean supportsInputEvents(int displayId) {
         // main display or any display on Android >= 10
         return displayId == 0 || Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10;
@@ -126,7 +122,7 @@ public final class Device {
         String currentClipboard = getClipboardText();
         if (currentClipboard != null && currentClipboard.equals(text)) {
             // The clipboard already contains the requested text.
-            // Since pasting text from the computer involves setting the device clipboard, it could be set twice on a copy-paste. This would cause
+            // Since pasting text from the head unit involves setting the device clipboard, it could be set twice on a copy-paste. This would cause
             // the clipboard listeners to be notified twice, and that would flood the Android keyboard clipboard history. To workaround this
             // problem, do not explicitly set the clipboard text if it already contains the expected content.
             return false;
@@ -185,15 +181,6 @@ public final class Device {
         return SurfaceControl.setDisplayPowerMode(d, mode);
     }
 
-    public static boolean powerOffScreen(int displayId) {
-        assert displayId != DISPLAY_ID_NONE;
-
-        if (!isScreenOn(displayId)) {
-            return true;
-        }
-        return pressReleaseKeycode(KeyEvent.KEYCODE_POWER, displayId, Device.INJECT_MODE_ASYNC);
-    }
-
     /**
      * Disable auto-rotation (if enabled), set the screen rotation and re-enable auto-rotation (if it was enabled).
      */
@@ -226,16 +213,6 @@ public final class Device {
 
         DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
         return displayInfo.getRotation();
-    }
-
-    public static List<DeviceApp> listApps() {
-        List<DeviceApp> apps = new ArrayList<>();
-        PackageManager pm = AppContext.get().getPackageManager();
-        for (ApplicationInfo appInfo : getLaunchableApps(pm)) {
-            apps.add(toApp(pm, appInfo));
-        }
-
-        return apps;
     }
 
     @SuppressLint("QueryPermissionsNeeded")

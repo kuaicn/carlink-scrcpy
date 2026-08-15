@@ -122,8 +122,11 @@ public class ScreenCapture extends SurfaceCapture {
             inputSize = displayInfo.getSize();
             assert glRunner == null;
             OpenGLFilter glFilter = new AffineOpenGLFilter(transform);
-            glRunner = new OpenGLRunner(glFilter);
-            surface = glRunner.start(inputSize, videoSize, surface);
+            OpenGLRunner runner = new OpenGLRunner(glFilter);
+            surface = runner.start(inputSize, videoSize, surface);
+            // Assign only on success: a failed start() must leave glRunner null, so that stop() stays a no-op and a later
+            // retry does not overwrite (and leak) a live runner
+            glRunner = runner;
         } else {
             // If there is no filter, the display must be rendered at target video size directly
             inputSize = videoSize;
@@ -152,7 +155,7 @@ public class ScreenCapture extends SurfaceCapture {
                 } catch (Exception surfaceControlException) {
                     Ln.e("Could not create display using DisplayManager", displayManagerException);
                     Ln.e("Could not create display using SurfaceControl", surfaceControlException);
-                    throw new AssertionError("Could not create display");
+                    throw new AssertionError("Could not create display", surfaceControlException);
                 }
             }
         }
@@ -184,6 +187,9 @@ public class ScreenCapture extends SurfaceCapture {
 
     @Override
     public void release() {
+        // Also stop the GL runner in case start() failed after having created it (a no-op if start() never succeeded)
+        stop();
+
         displayMonitor.stopAndRelease();
 
         if (display != null) {
@@ -208,7 +214,7 @@ public class ScreenCapture extends SurfaceCapture {
     }
 
     private static IBinder createDisplay() throws Exception {
-        // Since Android 12 (preview), secure displays could not be created with shell permissions anymore.
+        // Since Android 12 (preview), secure displays can no longer be created by unprivileged callers (the shell included).
         // On Android 12 preview, SDK_INT is still R (not S), but CODENAME is "S".
         boolean secure = Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11 || (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11
                 && !"S".equals(Build.VERSION.CODENAME));

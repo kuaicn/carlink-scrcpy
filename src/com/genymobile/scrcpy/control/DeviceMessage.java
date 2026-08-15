@@ -8,8 +8,6 @@ public final class DeviceMessage {
     private int type;
     private String text;
     private long sequence;
-    private int id;
-    private byte[] data;
 
     private DeviceMessage() {
     }
@@ -38,13 +36,5 @@ public final class DeviceMessage {
 
     public long getSequence() {
         return sequence;
-    }
-
-    public int getId() {
-        return id;
-    }
-
-    public byte[] getData() {
-        return data;
     }
 }

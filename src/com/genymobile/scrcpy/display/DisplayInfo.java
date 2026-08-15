@@ -46,8 +46,4 @@ public final class DisplayInfo {
     public int getDpi() {
         return dpi;
     }
-
-    public String getUniqueId() {
-        return uniqueId;
-    }
 }

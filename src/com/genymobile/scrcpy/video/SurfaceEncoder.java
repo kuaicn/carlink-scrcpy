@@ -35,6 +35,9 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final int[] MAX_SIZE_FALLBACK = {2560, 1920, 1600, 1280, 1024, 800};
     private static final int MAX_CONSECUTIVE_ERRORS = 3;
 
+    // Bounded join() on session teardown (see join())
+    private static final long JOIN_TIMEOUT_MS = 2000;
+
     private final SurfaceCapture capture;
     private final Streamer streamer;
     private final String encoderName;
@@ -74,28 +77,44 @@ public class SurfaceEncoder implements AsyncProcessor {
     private void streamCapture() throws IOException, ConfigurationException {
         Codec codec = streamer.getCodec();
         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
-        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, iFrameInterval, codecOptions);
 
+        // Assigned in the guarded setup block below, used by the main loop
+        MediaFormat format;
         MediaCodecInfo.VideoCapabilities caps;
-        int alignment;
-        if (ignoreVideoEncoderConstraints) {
-            caps = null;
-            alignment = 1;
-        } else {
-            caps = mediaCodec.getCodecInfo().getCapabilitiesForType(codec.getMimeType()).getVideoCapabilities();
-            assert caps != null; // caps cannot be null for a video codec
-            alignment = Math.max(caps.getWidthAlignment(), caps.getHeightAlignment());
-            Ln.d("Video codec size alignment requirement: " + alignment + "px");
-        }
-        if (alignment < minSizeAlignment) {
-            alignment = minSizeAlignment;
-            Ln.d("Actual video size alignment: " + alignment + "px");
-        }
 
-        // Do not constrain by the declared video encoder capabilities before encoding actually fails
-        videoConstraints = new VideoConstraints(maxSize, alignment, null);
+        boolean captureInitDone = false;
+        try {
+            format = createFormat(codec.getMimeType(), videoBitRate, maxFps, iFrameInterval, codecOptions);
 
-        capture.init(captureControl, videoConstraints);
+            int alignment;
+            if (ignoreVideoEncoderConstraints) {
+                caps = null;
+                alignment = 1;
+            } else {
+                caps = mediaCodec.getCodecInfo().getCapabilitiesForType(codec.getMimeType()).getVideoCapabilities();
+                assert caps != null; // caps cannot be null for a video codec
+                alignment = Math.max(caps.getWidthAlignment(), caps.getHeightAlignment());
+                Ln.d("Video codec size alignment requirement: " + alignment + "px");
+            }
+            if (alignment < minSizeAlignment) {
+                alignment = minSizeAlignment;
+                Ln.d("Actual video size alignment: " + alignment + "px");
+            }
+
+            // Do not constrain by the declared video encoder capabilities before encoding actually fails
+            videoConstraints = new VideoConstraints(maxSize, alignment, null);
+
+            // release() is null-safe even after a partially completed init(), so consider it needed as soon as init() is entered
+            captureInitDone = true;
+            capture.init(captureControl, videoConstraints);
+        } catch (Throwable t) {
+            // The main loop below is never entered: release here what its finally-block would have released
+            mediaCodec.release();
+            if (captureInitDone) {
+                capture.release();
+            }
+            throw t;
+        }
 
         try {
             boolean alive;
@@ -123,13 +142,11 @@ public class SurfaceEncoder implements AsyncProcessor {
 
                 Surface surface = null;
                 boolean mediaCodecStarted = false;
-                boolean captureStarted = false;
                 try {
                     mediaCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
                     surface = mediaCodec.createInputSurface();
 
                     capture.start(surface);
-                    captureStarted = true;
 
                     mediaCodec.start();
                     mediaCodecStarted = true;
@@ -150,7 +167,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                             encode(mediaCodec, streamer);
                         }
 
-                        // The capture might have been closed internally (for example if the camera is disconnected)
+                        // The capture might have been closed internally (defensive: no current implementation closes itself)
                         alive = !stopped.get() && !capture.isClosed();
                     }
                 } catch (IllegalStateException | IllegalArgumentException | IOException e) {
@@ -167,9 +184,9 @@ public class SurfaceEncoder implements AsyncProcessor {
                     alive = true;
                 } finally {
                     captureControl.setRunningMediaCodec(null);
-                    if (captureStarted) {
-                        capture.stop();
-                    }
+                    // Always stop the capture, even if start() failed partway: implementations tolerate stop() after a partial
+                    // start(), and this releases what start() may already have acquired (e.g. the GL runner)
+                    capture.stop();
                     if (mediaCodecStarted) {
                         try {
                             mediaCodec.stop();
@@ -177,14 +194,23 @@ public class SurfaceEncoder implements AsyncProcessor {
                             // ignore (just in case)
                         }
                     }
-                    mediaCodec.reset();
+                    try {
+                        mediaCodec.reset();
+                    } catch (IllegalStateException e) {
+                        // ignore (just in case): a failed reset must not skip the input surface release below
+                    }
                     if (surface != null) {
                         surface.release();
                     }
                 }
             } while (alive);
         } finally {
-            mediaCodec.release();
+            try {
+                mediaCodec.release();
+            } catch (RuntimeException e) {
+                // Do not mask capture.release(): a codec release failure must not leak the capture resources (e.g. the virtual display)
+                Ln.w("Could not release video codec: " + e.getMessage());
+            }
             capture.release();
         }
     }
@@ -263,7 +289,10 @@ public class SurfaceEncoder implements AsyncProcessor {
                     boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
                     if (!isConfig) {
                         // If this is not a config packet, then it contains a frame
-                        firstFrameSent = true;
+                        if (!firstFrameSent) {
+                            firstFrameSent = true;
+                            Ln.i("First video frame encoded (" + streamer.getCodec().getName() + ")");
+                        }
                         consecutiveErrors = 0;
                     }
 
@@ -286,6 +315,8 @@ public class SurfaceEncoder implements AsyncProcessor {
                 String mimeType = Codec.getMimeType(mediaCodec);
                 if (!codec.getMimeType().equals(mimeType)) {
                     Ln.e("Video encoder type for \"" + encoderName + "\" (" + mimeType + ") does not match codec type (" + codec.getMimeType() + ")");
+                    // Do not leak the created codec instance on this error path
+                    mediaCodec.release();
                     throw new ConfigurationException("Incorrect encoder type: " + encoderName);
                 }
                 return mediaCodec;
@@ -355,22 +386,26 @@ public class SurfaceEncoder implements AsyncProcessor {
             // <https://github.com/Genymobile/scrcpy/issues/4143>
             Looper.prepare();
 
+            Throwable cause = null;
             try {
                 streamCapture();
             } catch (ConfigurationException e) {
                 // Do not print stack trace, a user-friendly error-message has already been logged
+                cause = e;
             } catch (IOException e) {
                 // Broken pipe is expected on close, because the socket is closed by the client
                 if (!IO.isBrokenPipe(e)) {
                     Ln.e("Video encoding error", e);
+                    cause = e;
                 }
             } catch (Throwable t) {
                 // In-process hosting: never let an Error (e.g. AssertionError from a failed virtual display
                 // creation) escape the thread, it would kill the whole hosting app process
                 Ln.e("Fatal video capture error", t);
+                cause = t;
             } finally {
                 Ln.d("Screen streaming stopped");
-                listener.onTerminated(true);
+                listener.onTerminated(true, cause);
             }
         }, "video");
         thread.start();
@@ -387,7 +422,12 @@ public class SurfaceEncoder implements AsyncProcessor {
     @Override
     public void join() throws InterruptedException {
         if (thread != null) {
-            thread.join();
+            // Bounded wait: a codec stuck in dequeueOutputBuffer() (e.g. if signalEndOfInputStream() was rejected) must not block
+            // the whole session teardown forever; the sockets are closed right after, which makes the thread fail and exit anyway
+            thread.join(JOIN_TIMEOUT_MS);
+            if (thread.isAlive()) {
+                Ln.e("Video encoder thread did not terminate within " + JOIN_TIMEOUT_MS + "ms, giving up");
+            }
         }
     }
 }

@@ -63,6 +63,10 @@ public final class DisplayResizeDebouncer {
             }
         } catch (InterruptedException e) {
             // ignore
+        } catch (Throwable t) {
+            // In-process hosting: never let an exception escape the thread (e.g. a resize racing with the virtual display
+            // release), it would kill the hosting app process
+            Ln.e("Debouncer error", t);
         } finally {
             Ln.d("Debouncer thread stopped");
         }

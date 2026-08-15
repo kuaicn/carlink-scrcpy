@@ -7,7 +7,6 @@ import com.genymobile.scrcpy.model.Orientation;
 import com.genymobile.scrcpy.model.Size;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.video.VideoCodec;
-import com.genymobile.scrcpy.video.VideoSource;
 import com.genymobile.scrcpy.wrappers.WindowManager;
 
 import android.graphics.Rect;
@@ -19,31 +18,21 @@ import java.util.Locale;
 public class Options {
 
     private Ln.Level logLevel = Ln.Level.DEBUG;
-    private int scid = -1; // 31-bit non-negative value, or -1
-    private boolean video = true;
     private int maxSize;
     private int minSizeAlignment = 1;
     private VideoCodec videoCodec = VideoCodec.H264;
-    private VideoSource videoSource = VideoSource.DISPLAY;
     private int videoBitRate = 8000000;
     private float maxFps;
     private int iFrameInterval = 10; // seconds
     private float angle;
-    private boolean tunnelForward;
     private Rect crop;
-    private boolean control = true;
     private int displayId;
-    private boolean showTouches;
-    private boolean stayAwake;
-    private int screenOffTimeout = -1;
     private int displayImePolicy = -1;
     private List<CodecOption> videoCodecOptions;
 
     private String videoEncoder;
-    private boolean powerOffScreenOnClose;
     private boolean clipboardAutosync = true;
     private boolean downsizeOnError = true;
-    private boolean cleanup = true;
     private boolean powerOn = true;
 
     private NewDisplay newDisplay;
@@ -57,28 +46,11 @@ public class Options {
     private Orientation.Lock captureOrientationLock = Orientation.Lock.Unlocked;
     private Orientation captureOrientation = Orientation.Orient0;
 
-    private boolean listEncoders;
-    private boolean listDisplays;
-    private boolean listCameras;
-    private boolean listCameraSizes;
-    private boolean listApps;
-
-    // Options not used by the scrcpy client, but useful to use scrcpy-server directly
-    private boolean sendDeviceMeta = true; // send device name and size
-    private boolean sendFrameMeta = true; // send PTS so that the client may record properly
-    private boolean sendDummyByte = true; // write a byte on start to detect connection issues
-    private boolean sendStreamMeta = true; // write the stream metadata (codec and session)
+    // Not exposed through CarLinkServer.Config; kept for driving the upstream key=value parsing directly
+    private boolean sendFrameMeta = true; // send PTS so that the receiving head unit may record properly
 
     public Ln.Level getLogLevel() {
         return logLevel;
-    }
-
-    public int getScid() {
-        return scid;
-    }
-
-    public boolean getVideo() {
-        return video;
     }
 
     public int getMaxSize() {
@@ -91,10 +63,6 @@ public class Options {
 
     public VideoCodec getVideoCodec() {
         return videoCodec;
-    }
-
-    public VideoSource getVideoSource() {
-        return videoSource;
     }
 
     public int getVideoBitRate() {
@@ -113,32 +81,12 @@ public class Options {
         return angle;
     }
 
-    public boolean isTunnelForward() {
-        return tunnelForward;
-    }
-
     public Rect getCrop() {
         return crop;
     }
 
-    public boolean getControl() {
-        return control;
-    }
-
     public int getDisplayId() {
         return displayId;
-    }
-
-    public boolean getShowTouches() {
-        return showTouches;
-    }
-
-    public boolean getStayAwake() {
-        return stayAwake;
-    }
-
-    public int getScreenOffTimeout() {
-        return screenOffTimeout;
     }
 
     public int getDisplayImePolicy() {
@@ -153,20 +101,12 @@ public class Options {
         return videoEncoder;
     }
 
-    public boolean getPowerOffScreenOnClose() {
-        return this.powerOffScreenOnClose;
-    }
-
     public boolean getClipboardAutosync() {
         return clipboardAutosync;
     }
 
     public boolean getDownsizeOnError() {
         return downsizeOnError;
-    }
-
-    public boolean getCleanup() {
-        return cleanup;
     }
 
     public boolean getPowerOn() {
@@ -205,44 +145,8 @@ public class Options {
         return ignoreVideoEncoderConstraints;
     }
 
-    public boolean getList() {
-        return listEncoders || listDisplays || listCameras || listCameraSizes || listApps;
-    }
-
-    public boolean getListEncoders() {
-        return listEncoders;
-    }
-
-    public boolean getListDisplays() {
-        return listDisplays;
-    }
-
-    public boolean getListCameras() {
-        return listCameras;
-    }
-
-    public boolean getListCameraSizes() {
-        return listCameraSizes;
-    }
-
-    public boolean getListApps() {
-        return listApps;
-    }
-
-    public boolean getSendDeviceMeta() {
-        return sendDeviceMeta;
-    }
-
     public boolean getSendFrameMeta() {
         return sendFrameMeta;
-    }
-
-    public boolean getSendDummyByte() {
-        return sendDummyByte;
-    }
-
-    public boolean getSendStreamMeta() {
-        return sendStreamMeta;
     }
 
     @SuppressWarnings("MethodLength")
@@ -268,18 +172,8 @@ public class Options {
             String key = arg.substring(0, equalIndex);
             String value = arg.substring(equalIndex + 1);
             switch (key) {
-                case "scid":
-                    int scid = Integer.parseInt(value, 0x10);
-                    if (scid < -1) {
-                        throw new IllegalArgumentException("scid may not be negative (except -1 for 'none'): " + scid);
-                    }
-                    options.scid = scid;
-                    break;
                 case "log_level":
                     options.logLevel = Ln.Level.valueOf(value.toUpperCase(Locale.ENGLISH));
-                    break;
-                case "video":
-                    options.video = Boolean.parseBoolean(value);
                     break;
                 case "video_codec":
                     VideoCodec videoCodec = VideoCodec.findByName(value);
@@ -287,13 +181,6 @@ public class Options {
                         throw new IllegalArgumentException("Video codec " + value + " not supported");
                     }
                     options.videoCodec = videoCodec;
-                    break;
-                case "video_source":
-                    VideoSource videoSource = VideoSource.findByName(value);
-                    if (videoSource == null) {
-                        throw new IllegalArgumentException("Video source " + value + " not supported");
-                    }
-                    options.videoSource = videoSource;
                     break;
                 case "max_size":
                     options.maxSize = Integer.parseInt(value);
@@ -320,31 +207,13 @@ public class Options {
                 case "angle":
                     options.angle = parseFloat("angle", value);
                     break;
-                case "tunnel_forward":
-                    options.tunnelForward = Boolean.parseBoolean(value);
-                    break;
                 case "crop":
                     if (!value.isEmpty()) {
                         options.crop = parseCrop(value);
                     }
                     break;
-                case "control":
-                    options.control = Boolean.parseBoolean(value);
-                    break;
                 case "display_id":
                     options.displayId = Integer.parseInt(value);
-                    break;
-                case "show_touches":
-                    options.showTouches = Boolean.parseBoolean(value);
-                    break;
-                case "stay_awake":
-                    options.stayAwake = Boolean.parseBoolean(value);
-                    break;
-                case "screen_off_timeout":
-                    options.screenOffTimeout = Integer.parseInt(value);
-                    if (options.screenOffTimeout < -1) {
-                        throw new IllegalArgumentException("Invalid screen off timeout: " + options.screenOffTimeout);
-                    }
                     break;
                 case "video_codec_options":
                     options.videoCodecOptions = CodecOption.parse(value);
@@ -354,35 +223,14 @@ public class Options {
                         options.videoEncoder = value;
                     }
                     break;
-                case "power_off_on_close":
-                    options.powerOffScreenOnClose = Boolean.parseBoolean(value);
-                    break;
                 case "clipboard_autosync":
                     options.clipboardAutosync = Boolean.parseBoolean(value);
                     break;
                 case "downsize_on_error":
                     options.downsizeOnError = Boolean.parseBoolean(value);
                     break;
-                case "cleanup":
-                    options.cleanup = Boolean.parseBoolean(value);
-                    break;
                 case "power_on":
                     options.powerOn = Boolean.parseBoolean(value);
-                    break;
-                case "list_encoders":
-                    options.listEncoders = Boolean.parseBoolean(value);
-                    break;
-                case "list_displays":
-                    options.listDisplays = Boolean.parseBoolean(value);
-                    break;
-                case "list_cameras":
-                    options.listCameras = Boolean.parseBoolean(value);
-                    break;
-                case "list_camera_sizes":
-                    options.listCameraSizes = Boolean.parseBoolean(value);
-                    break;
-                case "list_apps":
-                    options.listApps = Boolean.parseBoolean(value);
                     break;
                 case "new_display":
                     options.newDisplay = parseNewDisplay(value);
@@ -410,26 +258,8 @@ public class Options {
                 case "ignore_video_encoder_constraints":
                     options.ignoreVideoEncoderConstraints = Boolean.parseBoolean(value);
                     break;
-                case "send_device_meta":
-                    options.sendDeviceMeta = Boolean.parseBoolean(value);
-                    break;
                 case "send_frame_meta":
                     options.sendFrameMeta = Boolean.parseBoolean(value);
-                    break;
-                case "send_dummy_byte":
-                    options.sendDummyByte = Boolean.parseBoolean(value);
-                    break;
-                case "send_stream_meta":
-                    options.sendStreamMeta = Boolean.parseBoolean(value);
-                    break;
-                case "raw_stream":
-                    boolean rawStream = Boolean.parseBoolean(value);
-                    if (rawStream) {
-                        options.sendDeviceMeta = false;
-                        options.sendFrameMeta = false;
-                        options.sendDummyByte = false;
-                        options.sendStreamMeta = false;
-                    }
                     break;
                 default:
                     Ln.w("Unknown server option: " + key);

@@ -259,7 +259,7 @@ public class NewDisplayCapture extends SurfaceCapture {
             });
         } catch (Exception e) {
             Ln.e("Could not create display", e);
-            throw new AssertionError("Could not create display");
+            throw new AssertionError("Could not create display", e);
         }
     }
 
@@ -268,8 +268,11 @@ public class NewDisplayCapture extends SurfaceCapture {
         if (displayTransform != null) {
             assert glRunner == null;
             OpenGLFilter glFilter = new AffineOpenGLFilter(displayTransform);
-            glRunner = new OpenGLRunner(glFilter);
-            surface = glRunner.start(physicalSize, videoSize, surface);
+            OpenGLRunner runner = new OpenGLRunner(glFilter);
+            surface = runner.start(physicalSize, videoSize, surface);
+            // Assign only on success: a failed start() must leave glRunner null, so that stop() stays a no-op and a later
+            // retry does not overwrite (and leak) a live runner
+            glRunner = runner;
         }
 
         if (virtualDisplay == null) {
@@ -294,6 +297,9 @@ public class NewDisplayCapture extends SurfaceCapture {
 
     @Override
     public void release() {
+        // Also stop the GL runner in case start() failed after having created it (a no-op if start() never succeeded)
+        stop();
+
         displayMonitor.stopAndRelease();
 
         if (debouncer != null) {
