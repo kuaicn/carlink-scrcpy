@@ -66,7 +66,7 @@ public final class StatusBarManager {
             } else {
                 method.invoke(manager);
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }
@@ -81,7 +81,7 @@ public final class StatusBarManager {
                 // old version
                 method.invoke(manager);
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }
@@ -90,7 +90,7 @@ public final class StatusBarManager {
         try {
             Method method = getCollapsePanelsMethod();
             method.invoke(manager);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }

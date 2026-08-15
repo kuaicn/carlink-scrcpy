@@ -40,7 +40,7 @@ Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集
 1. **全链路 Throwable 兜底**：所有自建线程（会话/video/control-recv/control-send）捕获 `Throwable`，任何 `Error`（如虚拟屏创建失败的 `AssertionError`）不会逃出线程杀死宿主进程；processor 异常终止的首个错误经 `AsyncProcessor.onTerminated(fatalError, cause)` 传递，由会话线程通过 `Listener.onError()` 上报（随后 `onStopped()`）。
 2. **单消息容错**：`Controller` 应用单条控制消息时的 `RuntimeException`（权限被收回、事件被系统拒绝等）只记日志、会话继续；已定义但不支持的 CAMERA_* / RESIZE_DISPLAY 消息不会落到上游的 `AssertionError`（后者由非 flex 虚拟屏抛 `IllegalStateException`，同样被容错捕获）。
 3. **有界 join**：会话拆除链上所有 `join()`（`Controller`/`DeviceMessageSender`/`SurfaceEncoder`/`OpenGLRunner`）均有 2s 上限，卡死的线程不再永久阻塞清理；`stop()` 中断会话线程也不再跳过后续 join 与 GL 线程关停。
-4. **视频 accept 看门狗**：`accept()` 以 2s 轮询（`VIDEO_ACCEPT_POLL_MS`），等待车机视频连接期间检测到控制通道已断开（`isControlSocketDead()`）即结束会话，不留孤儿会话空转。
+4. **视频 accept 看门狗**：`accept()` 以 2s 轮询（`VIDEO_ACCEPT_POLL_MS`），等待车机视频连接期间检测到控制通道已断开（`isControlSocketDead()`）即结束会话，不留孤儿会话空转；另有 30s 总体超时（`VIDEO_ACCEPT_TIMEOUT_MS`）兜底——车机断电/拔线造成的半开死控制连接（收不到 FIN）轮询探测不到，超时即到点结束会话并释放库实例，后续连接不会被永久 busy 拒绝。
 5. **协议长度上限**：`ControlMessageReader` 对带长度前缀的字段在分配缓冲前拒绝超过 256 KiB（`MESSAGE_MAX_SIZE`）的长度——上游的 4 字节长度字段可被诱导分配至多 4GB。
 6. **资源清理补全**：stop() 注销系统剪贴板 autosync 监听（否则每会话泄漏一个 listener 并回调进死会话）、`shutdownNow()` 关闭 `startAppExecutor`；视频连接建立前中止的路径同样关闭调用方移交的控制 socket；`CarLinkConnection` 建立失败不泄漏 dup 出的 fd；`SurfaceEncoder` 启动阶段失败即释放 codec/capture；`OpenGLRunner` 关停后复位静态线程引用（重开会话拿到新线程）。
 7. **日志埋点**：视频连接 accept 成功、首次触控注入成功（里程碑，证明注入链路端到端可用）、注入被系统持续拒绝（一次性告警，不刷屏）等关键路径日志。

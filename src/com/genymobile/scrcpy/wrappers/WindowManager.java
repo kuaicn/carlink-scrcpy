@@ -120,7 +120,7 @@ public final class WindowManager {
         try {
             Method method = getGetRotationMethod();
             return (int) method.invoke(manager);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
             return 0;
         }
@@ -144,7 +144,7 @@ public final class WindowManager {
                     method.invoke(manager, rotation);
                     break;
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }
@@ -162,7 +162,7 @@ public final class WindowManager {
                     }
                     return (boolean) method.invoke(manager);
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
             return false;
         }
@@ -186,7 +186,7 @@ public final class WindowManager {
                     method.invoke(manager);
                     break;
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }
@@ -231,7 +231,7 @@ public final class WindowManager {
             }
             boolean shouldShowIme = (boolean) method.invoke(manager, displayId);
             return shouldShowIme ? DISPLAY_IME_POLICY_LOCAL : DISPLAY_IME_POLICY_FALLBACK_DISPLAY;
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
             return -1;
         }
@@ -260,7 +260,7 @@ public final class WindowManager {
             } else {
                 Ln.w("DISPLAY_IME_POLICY_HIDE is not supported before Android 12");
             }
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }

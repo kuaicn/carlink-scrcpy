@@ -45,7 +45,7 @@ public final class PowerManager {
                 return (boolean) method.invoke(manager, displayId);
             }
             return (boolean) method.invoke(manager);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
             return false;
         }
@@ -73,7 +73,7 @@ public final class PowerManager {
                 return;
             }
             method.invoke(manager, time, USER_ACTIVITY_EVENT_OTHER, 0);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
         }
     }

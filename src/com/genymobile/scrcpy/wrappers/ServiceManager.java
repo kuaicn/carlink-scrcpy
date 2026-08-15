@@ -1,5 +1,7 @@
 package com.genymobile.scrcpy.wrappers;
 
+import com.genymobile.scrcpy.util.Ln;
+
 import android.annotation.SuppressLint;
 import android.os.IBinder;
 import android.os.IInterface;
@@ -34,6 +36,11 @@ public final class ServiceManager {
     static IInterface getService(String service, String type) {
         try {
             IBinder binder = (IBinder) GET_SERVICE_METHOD.invoke(null, service);
+            if (binder == null) {
+                // The service may not be registered yet (e.g. early boot), the wrapper methods will fail gracefully
+                Ln.e("Service not available: " + service);
+                return null;
+            }
             Method asInterfaceMethod = Class.forName(type + "$Stub").getMethod("asInterface", IBinder.class);
             return (IInterface) asInterfaceMethod.invoke(null, binder);
         } catch (Exception e) {

@@ -18,9 +18,16 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructPollfd;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -217,6 +224,18 @@ public final class CarLinkServer {
     /** Poll interval while waiting for the video connection, so that a dead control channel is detected. */
     private static final int VIDEO_ACCEPT_POLL_MS = 2000;
 
+    /**
+     * Overall timeout for waiting for the video connection. The poll-based dead-control detection only catches a peer that
+     * actually closed (FIN/RST received): a half-open dead control channel (head unit powered off or unplugged, no FIN ever
+     * sent) is undetectable that way, so without an upper bound the session would wait forever, holding the single library
+     * instance and rejecting every later connection as busy.
+     */
+    private static final int VIDEO_ACCEPT_TIMEOUT_MS = 30000;
+
+    // Linux UAPI value of POLLRDHUP (peer shutdown/close notification for poll()): OsConstants does not expose it (it is not
+    // part of the public SDK), but the value is fixed by the kernel ABI
+    private static final int POLLRDHUP = 0x2000;
+
     private final Options options;
     private final Socket controlSocket;
     private final Listener listener;
@@ -269,11 +288,22 @@ public final class CarLinkServer {
 
         Ln.initLogLevel(options.getLogLevel());
 
-        // Bind synchronously so that getVideoPort() is valid as soon as start() returns, and bind failures are reported to the caller
-        ServerSocket videoServerSocket;
+        // Bind synchronously so that getVideoPort() is valid as soon as start() returns, and bind failures are reported to the caller.
+        // SO_REUSEADDR: a fixed port must be immediately rebindable by the next session, since the accepted sockets of the
+        // previous session may still be in TIME_WAIT on this local port after an onStopped() -> start() restart
+        ServerSocket videoServerSocket = null;
         try {
-            videoServerSocket = new ServerSocket(config.getVideoPort());
+            videoServerSocket = new ServerSocket();
+            videoServerSocket.setReuseAddress(true);
+            videoServerSocket.bind(new InetSocketAddress(config.getVideoPort()));
         } catch (IOException e) {
+            if (videoServerSocket != null) {
+                try {
+                    videoServerSocket.close();
+                } catch (IOException closeException) {
+                    // ignore
+                }
+            }
             throw new UncheckedIOException("Could not bind video server socket on port " + config.getVideoPort(), e);
         }
 
@@ -395,19 +425,51 @@ public final class CarLinkServer {
     /**
      * Wait for the head unit to connect the video channel, polling so that a control channel which dies in the
      * meantime does not leave the session stuck forever (also unblocked by {@link #stop()} closing the ServerSocket).
+     * <p>
+     * The wait is additionally bounded by {@link #VIDEO_ACCEPT_TIMEOUT_MS}: the dead-control poll cannot detect a
+     * half-open control channel (peer gone without FIN/RST), so only an overall timeout guarantees that the session
+     * (and the single library instance) is always released.
      *
      * @return the connected video socket, or {@code null} if the session must end before any video connection
      */
     private Socket acceptVideo() throws IOException {
         videoServerSocket.setSoTimeout(VIDEO_ACCEPT_POLL_MS);
+        long acceptDeadline = SystemClock.uptimeMillis() + VIDEO_ACCEPT_TIMEOUT_MS;
         while (running.get()) {
             try {
                 Socket socket = videoServerSocket.accept();
+                if (!running.get()) {
+                    // stop() was requested while accept() was blocked: do not start processors for a session already stopping
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        // ignore
+                    }
+                    return null;
+                }
+                // The video port is reachable by any device on the hotspot: accept only the peer holding the control
+                // channel. A foreign connection accepted first would otherwise be streamed to, while the real head
+                // unit sits in the listen backlog staring at a frozen screen. (Accepted sockets are never null here,
+                // the control socket is connected by contract, so no null check is needed.)
+                if (!socket.getInetAddress().equals(controlSocket.getInetAddress())) {
+                    Ln.w("Rejecting video connection from " + socket.getRemoteSocketAddress()
+                            + ": not the control channel peer (" + controlSocket.getInetAddress() + ")");
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        // ignore
+                    }
+                    continue;
+                }
                 Ln.i("Video connection accepted from " + socket.getRemoteSocketAddress() + " on port " + socket.getLocalPort());
                 return socket;
             } catch (SocketTimeoutException e) {
                 if (isControlSocketDead()) {
                     Ln.w("Control channel closed while waiting for the video connection; ending session");
+                    return null;
+                }
+                if (SystemClock.uptimeMillis() >= acceptDeadline) {
+                    Ln.w("Timed out waiting for the video connection (" + VIDEO_ACCEPT_TIMEOUT_MS + " ms); ending session");
                     return null;
                 }
             }
@@ -420,11 +482,37 @@ public final class CarLinkServer {
      * consuming any protocol bytes
      */
     private boolean isControlSocketDead() {
-        try {
-            // SocketInputStream.available() returns -1 once the peer's FIN has been received
-            return controlSocket.isClosed() || controlSocket.getInputStream().available() < 0;
-        } catch (IOException e) {
+        if (controlSocket.isClosed()) {
             return true;
+        }
+        // InputStream.available() cannot detect a peer close (FIONREAD only reports queued bytes, never EOF), and read() would
+        // consume protocol bytes. Poll the raw fd instead: a peer FIN/RST shows up as POLLRDHUP/POLLERR/POLLHUP, while pending
+        // data shows up as plain POLLIN (alive).
+        ParcelFileDescriptor pfd;
+        try {
+            pfd = ParcelFileDescriptor.fromSocket(controlSocket);
+        } catch (RuntimeException e) {
+            return true;
+        }
+        if (pfd == null) {
+            // The socket has no fd (i.e. it is not connected)
+            return true;
+        }
+        try {
+            StructPollfd pollfd = new StructPollfd();
+            pollfd.fd = pfd.getFileDescriptor();
+            pollfd.events = (short) (OsConstants.POLLIN | POLLRDHUP);
+            StructPollfd[] pollfds = {pollfd};
+            Os.poll(pollfds, 0);
+            return (pollfd.revents & (POLLRDHUP | OsConstants.POLLERR | OsConstants.POLLHUP)) != 0;
+        } catch (ErrnoException e) {
+            return true;
+        } finally {
+            try {
+                pfd.close();
+            } catch (IOException e) {
+                // ignore
+            }
         }
     }
 

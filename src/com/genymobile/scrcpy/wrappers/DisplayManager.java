@@ -147,16 +147,19 @@ public final class DisplayManager {
                 uniqueId = null;
             }
             return new DisplayInfo(displayId, new Size(width, height), rotation, layerStack, flags, dpi, uniqueId);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError(e);
+        } catch (Throwable e) {
+            // Do not kill the calling thread on reflection failure, fallback to parsing "dumpsys display"
+            Ln.e("Could not get display info by reflection", e);
+            return getDisplayInfoFromDumpsysDisplay(displayId);
         }
     }
 
     public int[] getDisplayIds() {
         try {
             return (int[]) manager.getClass().getMethod("getDisplayIds").invoke(manager);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError(e);
+        } catch (Throwable e) {
+            Ln.e("Could not get display ids", e);
+            return null;
         }
     }
 
@@ -183,7 +186,8 @@ public final class DisplayManager {
 
     private Method getRequestDisplayPowerMethod() throws NoSuchMethodException {
         if (requestDisplayPowerMethod == null) {
-            requestDisplayPowerMethod = manager.getClass().getMethod("requestDisplayPower", int.class, boolean.class);
+            // The final Android 15+ API takes a display state int, not a boolean (the boolean only existed in previews)
+            requestDisplayPowerMethod = manager.getClass().getMethod("requestDisplayPower", int.class, int.class);
         }
         return requestDisplayPowerMethod;
     }
@@ -192,7 +196,9 @@ public final class DisplayManager {
     public boolean requestDisplayPower(int displayId, boolean on) {
         try {
             Method method = getRequestDisplayPowerMethod();
-            return (boolean) method.invoke(manager, displayId, on);
+            // STATE_UNKNOWN resets the display to the state it should have now (i.e. on), STATE_OFF powers it off
+            int state = on ? Display.STATE_UNKNOWN : Display.STATE_OFF;
+            return (boolean) method.invoke(manager, displayId, state);
         } catch (ReflectiveOperationException e) {
             Ln.e("Could not invoke method", e);
             return false;

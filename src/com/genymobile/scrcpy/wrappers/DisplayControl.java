@@ -54,6 +54,10 @@ public final class DisplayControl {
     }
 
     public static IBinder getPhysicalDisplayToken(long physicalDisplayId) {
+        if (CLASS == null) {
+            // Initialization failed (already logged), a reflective call would throw a NullPointerException
+            return null;
+        }
         try {
             Method method = getGetPhysicalDisplayTokenMethod();
             return (IBinder) method.invoke(null, physicalDisplayId);
@@ -71,6 +75,10 @@ public final class DisplayControl {
     }
 
     public static long[] getPhysicalDisplayIds() {
+        if (CLASS == null) {
+            // Initialization failed (already logged), a reflective call would throw a NullPointerException
+            return null;
+        }
         try {
             Method method = getGetPhysicalDisplayIdsMethod();
             return (long[]) method.invoke(null);

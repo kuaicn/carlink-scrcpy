@@ -50,7 +50,7 @@ public final class InputManager {
         try {
             Method method = getInjectInputEventMethod();
             return (boolean) method.invoke(manager, inputEvent, mode);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             if (e instanceof InvocationTargetException) {
                 Throwable cause = e.getCause();
                 if (cause instanceof SecurityException) {
@@ -122,7 +122,7 @@ public final class InputManager {
         try {
             Method method = getAddUniqueIdAssociationByPortMethod();
             method.invoke(manager, inputPort, uniqueId);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Cannot add unique id association by port", e);
         }
     }
@@ -140,7 +140,7 @@ public final class InputManager {
         try {
             Method method = getRemoveUniqueIdAssociationByPortMethod();
             method.invoke(manager, inputPort);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Cannot remove unique id association by port", e);
         }
     }

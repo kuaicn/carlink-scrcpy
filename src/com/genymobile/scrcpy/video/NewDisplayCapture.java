@@ -73,6 +73,7 @@ public class NewDisplayCapture extends SurfaceCapture {
     private DisplayResizeDebouncer debouncer;
 
     private int dpi;
+    private int displayRotation;
 
     public NewDisplayCapture(VirtualDisplayListener vdListener, Options options) {
         this.vdListener = vdListener;
@@ -130,7 +131,6 @@ public class NewDisplayCapture extends SurfaceCapture {
 
     @Override
     public void prepare() {
-        int displayRotation;
         if (virtualDisplay == null) {
             if (flexDisplay) {
                 assert displaySize != null;
@@ -155,9 +155,16 @@ public class NewDisplayCapture extends SurfaceCapture {
             displayMonitor.setSessionDisplayProperties(new DisplayProperties(displaySize, displayRotation));
         } else {
             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(virtualDisplay.getDisplay().getDisplayId());
-            dpi = displayInfo.getDpi();
-            displayRotation = displayInfo.getRotation();
-            displaySize = displayInfo.getSize();
+            if (displayInfo != null) {
+                dpi = displayInfo.getDpi();
+                displayRotation = displayInfo.getRotation();
+                displaySize = displayInfo.getSize();
+            } else {
+                // The display info may be temporarily unavailable while the display is being reconfigured (the DisplayMonitor
+                // resets unconditionally in that case): keep the last known properties; a new reset will be requested once they
+                // can be retrieved again
+                Ln.w("Display info for display " + virtualDisplay.getDisplay().getDisplayId() + " unavailable, keeping previous values");
+            }
             if (flexDisplay) {
                 displaySize = displaySize.constrain(videoConstraints, false);
             } else {
@@ -364,8 +371,15 @@ public class NewDisplayCapture extends SurfaceCapture {
             size = size.constrain(videoConstraints, false); // in case the constraints have changed
             int displayId = virtualDisplay.getDisplay().getDisplayId();
             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+            if (displayInfo == null) {
+                // Drop this resize request (a new one may be requested later): an exception would kill the debouncer thread,
+                // which never recovers
+                Ln.w("Display info for display " + displayId + " unavailable, resize request dropped");
+                return;
+            }
             @SuppressWarnings("checkstyle:HiddenField") // hides this.dpi on purpose
             int dpi = displayInfo.getDpi();
+            @SuppressWarnings("checkstyle:HiddenField") // hides this.displayRotation on purpose
             int displayRotation = displayInfo.getRotation();
             if (captureOrientation.isSwap()) {
                 size = size.rotate();
