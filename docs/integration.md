@@ -46,6 +46,8 @@ android_app {
 | `android.permission.INTERNAL_SYSTEM_WINDOW` | 跨屏启动 Activity | 互联服务通过 `ActivityOptions.setLaunchDisplayId()` 把车机桌面 Activity 启动到虚拟屏；非默认屏启动在 ActivityTaskManagerService 侧检查该权限 |
 | `android.permission.ADD_TRUSTED_DISPLAY` | 创建 TRUSTED 虚拟屏 | `NewDisplayCapture` 创建 VirtualDisplay 时带 `VIRTUAL_DISPLAY_FLAG_TRUSTED`（及 OWN_FOCUS/OWN_DISPLAY_GROUP 等组合 flag，Android 13+），DisplayManagerService 检查该权限；无 TRUSTED 的虚拟屏无法显示锁屏/系统 UI 且焦点行为受限 |
 | `android.permission.ADD_ALWAYS_UNLOCKED_DISPLAY` | 创建 ALWAYS_UNLOCKED 虚拟屏 | flag 组合含 `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED`（Android 13+，使虚拟屏不受手机锁屏状态影响），DisplayManagerService 单独检查该权限；缺失会抛 `SecurityException: Requires ADD_ALWAYS_UNLOCKED_DISPLAY permission...`（真机已验证） |
+| `android.permission.MANAGE_DISPLAYS` | 会话期间关闭手机物理屏 | 互联服务在车机连接后调 `DisplayManagerGlobal.requestDisplayPower(DEFAULT_DISPLAY, STATE_OFF)`（息屏只在车机端显示），结束时以 `STATE_UNKNOWN` 恢复；DMS 侧 `@EnforcePermission("MANAGE_DISPLAYS")` 检查 |
+| `android.permission.WRITE_SECURE_SETTINGS` | 会话期间禁止锁屏 | 互联服务在会话期将 `Settings.Secure"lockscreen.disabled"` 置 1（保存原值，结束时恢复），防止息屏后锁屏介入打断车机端操作 |
 
 另建议（非 signature 级，安装期自动授予）：
 
@@ -66,6 +68,8 @@ signature 权限除平台签名外，还需在 privapp 白名单中显式声明�
         <permission name="android.permission.INTERNAL_SYSTEM_WINDOW"/>
         <permission name="android.permission.ADD_TRUSTED_DISPLAY"/>
         <permission name="android.permission.ADD_ALWAYS_UNLOCKED_DISPLAY"/>
+        <permission name="android.permission.MANAGE_DISPLAYS"/>
+        <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
     </privapp-permissions>
 </permissions>
 ```
