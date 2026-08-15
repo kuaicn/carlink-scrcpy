@@ -1,5 +1,6 @@
 package com.genymobile.scrcpy.device;
 
+import com.genymobile.scrcpy.SessionProgressListener;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.util.IO;
 
@@ -19,14 +20,16 @@ public final class Streamer {
     private final Codec codec;
     private final boolean sendStreamMeta;
     private final boolean sendFrameMeta;
+    private final SessionProgressListener progressListener;
 
     private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
 
-    public Streamer(FileDescriptor fd, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
+    public Streamer(FileDescriptor fd, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta, SessionProgressListener progressListener) {
         this.fd = fd;
         this.codec = codec;
         this.sendStreamMeta = sendCodecMeta;
         this.sendFrameMeta = sendFrameMeta;
+        this.progressListener = progressListener;
     }
 
     public Codec getCodec() {
@@ -52,6 +55,8 @@ public final class Streamer {
         }
 
         IO.writeFully(fd, buffer);
+        // Stamp only after the packet reached the socket: a blocked/failed write means no progress (session watchdog input)
+        progressListener.onSessionProgress();
     }
 
     public void writePacket(ByteBuffer codecBuffer, MediaCodec.BufferInfo bufferInfo) throws IOException {

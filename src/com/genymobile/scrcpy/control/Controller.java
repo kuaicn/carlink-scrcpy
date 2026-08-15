@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.control;
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.Options;
+import com.genymobile.scrcpy.SessionProgressListener;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.model.DeviceApp;
 import com.genymobile.scrcpy.model.Point;
@@ -73,6 +74,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     // Interval between simulated user activity events
     private static final long KEEP_ACTIVE_INTERVAL_MS = 4000;
 
+    // Interval between heartbeat device messages (see docs/carlink-protocol.md): they keep an idle but healthy session
+    // observable on the control channel, feeding the CarLinkServer session watchdog
+    private static final long HEARTBEAT_INTERVAL_MS = 10_000;
+
     private static final long JOIN_TIMEOUT_MS = 2000;
 
     private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -85,11 +90,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private Thread thread;
     private Thread keepActiveThread;
+    private Thread heartbeatThread;
 
     private final int displayId;
     private final boolean supportsInputEvents;
     private final ControlChannel controlChannel;
     private final DeviceMessageSender sender;
+    private final SessionProgressListener progressListener;
     private final boolean clipboardAutosync;
     private final boolean powerOn;
     private final boolean keepActive;
@@ -117,7 +124,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     // Used for resetting video encoding on RESET_VIDEO message
     private SurfaceCapture surfaceCapture;
 
-    public Controller(ControlChannel controlChannel, Options options) {
+    public Controller(ControlChannel controlChannel, Options options, SessionProgressListener progressListener) {
         this.controlChannel = controlChannel;
         this.displayId = options.getDisplayId();
 
@@ -125,7 +132,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         this.powerOn = options.getPowerOn();
         this.keepActive = options.getKeepActive();
         initPointers();
-        sender = new DeviceMessageSender(controlChannel);
+        this.progressListener = progressListener;
+        sender = new DeviceMessageSender(controlChannel, progressListener);
 
         supportsInputEvents = Device.supportsInputEvents(displayId);
         if (!supportsInputEvents) {
@@ -237,11 +245,33 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         keepActiveThread.start();
     }
 
+    private void startHeartbeatThread() {
+        heartbeatThread = new Thread(() -> {
+            try {
+                while (true) {
+                    Thread.sleep(HEARTBEAT_INTERVAL_MS);
+                    // The sender queue is bounded and drops when full: heartbeats never pile up behind a stuck sender
+                    sender.send(DeviceMessage.createHeartbeat());
+                }
+            } catch (InterruptedException e) {
+                // ignore
+            } catch (Throwable e) {
+                Ln.e("Heartbeat error", e);
+            } finally {
+                Ln.d("Heartbeat thread stopped");
+            }
+        });
+        heartbeatThread.setName("heartbeat");
+        heartbeatThread.setDaemon(true);
+        heartbeatThread.start();
+    }
+
     @Override
     public void start(TerminationListener listener) {
         if (keepActive) {
             startKeepActiveThread();
         }
+        startHeartbeatThread();
 
         thread = new Thread(() -> {
             Throwable cause = null;
@@ -273,6 +303,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (keepActiveThread != null) {
             keepActiveThread.interrupt();
         }
+        if (heartbeatThread != null) {
+            heartbeatThread.interrupt();
+        }
         if (thread != null) {
             thread.interrupt();
         }
@@ -299,6 +332,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         ControlMessage msg;
         try {
             msg = controlChannel.recv();
+            // Any message received from the head unit proves the peer alive: feed the session watchdog
+            progressListener.onSessionProgress();
         } catch (ControlProtocolException e) {
             Ln.e("Control protocol error", e);
             return false;

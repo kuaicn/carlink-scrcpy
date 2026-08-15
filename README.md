@@ -44,6 +44,7 @@ Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集
 5. **协议长度上限**：`ControlMessageReader` 对带长度前缀的字段在分配缓冲前拒绝超过 256 KiB（`MESSAGE_MAX_SIZE`）的长度——上游的 4 字节长度字段可被诱导分配至多 4GB。
 6. **资源清理补全**：stop() 注销系统剪贴板 autosync 监听（否则每会话泄漏一个 listener 并回调进死会话）、`shutdownNow()` 关闭 `startAppExecutor`；视频连接建立前中止的路径同样关闭调用方移交的控制 socket；`CarLinkConnection` 建立失败不泄漏 dup 出的 fd；`SurfaceEncoder` 启动阶段失败即释放 codec/capture；`OpenGLRunner` 关停后复位静态线程引用（重开会话拿到新线程）。
 7. **日志埋点**：视频连接 accept 成功、首次触控注入成功（里程碑，证明注入链路端到端可用）、注入被系统持续拒绝（一次性告警，不刷屏）等关键路径日志。
+8. **心跳 + 会话看门狗**：会话期间每 10s 向控制通道投递 HEARTBEAT device 消息（自有协议扩展，type=3，仅 1 字节）；看门狗以「实际完成的通道 I/O」（视频帧写出、控制消息接收、device 消息写出）为进展信号，30s 无进展即 shutdown 两条通道并走既有 terminate() 完整清理——车机断电/断网黑洞（无 FIN）导致的悬挂会话被回收，库单实例不再被永久占用（详见 `docs/carlink-protocol.md`「HEARTBEAT 与会话保活」）。
 
 ## 架构与线程模型
 

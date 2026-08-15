@@ -1,5 +1,6 @@
 package com.genymobile.scrcpy.control;
 
+import com.genymobile.scrcpy.SessionProgressListener;
 import com.genymobile.scrcpy.util.Ln;
 
 import java.io.IOException;
@@ -11,12 +12,14 @@ public final class DeviceMessageSender {
     private static final long JOIN_TIMEOUT_MS = 2000;
 
     private final ControlChannel controlChannel;
+    private final SessionProgressListener progressListener;
 
     private Thread thread;
     private final BlockingQueue<DeviceMessage> queue = new ArrayBlockingQueue<>(16);
 
-    public DeviceMessageSender(ControlChannel controlChannel) {
+    public DeviceMessageSender(ControlChannel controlChannel, SessionProgressListener progressListener) {
         this.controlChannel = controlChannel;
+        this.progressListener = progressListener;
     }
 
     public void send(DeviceMessage msg) {
@@ -29,6 +32,8 @@ public final class DeviceMessageSender {
         while (!Thread.currentThread().isInterrupted()) {
             DeviceMessage msg = queue.take();
             controlChannel.send(msg);
+            // Stamp only after the write completed: an enqueued message says nothing about the link, a written one does
+            progressListener.onSessionProgress();
         }
     }
 

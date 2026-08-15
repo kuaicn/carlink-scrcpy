@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -265,6 +266,17 @@ public final class CarLinkServer {
     /** Poll interval while waiting for the video connection, so that a dead control channel is detected. */
     private static final int VIDEO_ACCEPT_POLL_MS = 2000;
 
+    /** Interval between session watchdog checks (see {@link #startWatchdog()}). */
+    private static final int WATCHDOG_CHECK_INTERVAL_MS = 2000;
+
+    /**
+     * The session watchdog force-terminates the session when no progress (any successful channel I/O, see
+     * {@link SessionProgressListener}) was observed for this long. The heartbeat the Controller queues every 10s keeps a
+     * healthy but idle session (static screen, no input) fed; on a dead peer (head unit powered off, network black hole)
+     * the heartbeat write blocks or fails, progress stops and the watchdog fires.
+     */
+    private static final int SESSION_STALL_TIMEOUT_MS = 30000;
+
     /**
      * Overall timeout for waiting for the video connection. The poll-based dead-control detection only catches a peer that
      * actually closed (FIN/RST received): a half-open dead control channel (head unit powered off or unplugged, no FIN ever
@@ -288,9 +300,12 @@ public final class CarLinkServer {
     // Written by a processor thread terminating with an error (first error wins), read by the session thread to report it via
     // Listener.onError() before onStopped()
     private final AtomicReference<Throwable> sessionErrorCause = new AtomicReference<>();
+    // Stamped by the session I/O threads via onSessionProgress(), read by the watchdog thread
+    private final AtomicLong lastProgressMs = new AtomicLong();
 
     // Only accessed on the session thread (except where noted)
     private CarLinkConnection connection;
+    private Thread watchdogThread;
     private final List<AsyncProcessor> asyncProcessors = new ArrayList<>();
     // Only accessed on the video encoder thread (which is the only caller of the VirtualDisplayListener)
     private int lastNotifiedDisplayId = Device.DISPLAY_ID_NONE;
@@ -594,12 +609,13 @@ public final class CarLinkServer {
         }
 
         ControlChannel controlChannel = connection.getControlChannel();
-        Controller controller = new Controller(controlChannel, options);
+        Controller controller = new Controller(controlChannel, options, this::onSessionProgress);
         asyncProcessors.add(controller);
 
         // sendStreamMeta=false: no session meta packets on the wire (CarLink protocol); the 4-byte codec id is always written.
         // sendFrameMeta=true is enforced through the options built by buildOptions().
-        Streamer videoStreamer = new Streamer(connection.getVideoFd(), options.getVideoCodec(), false, options.getSendFrameMeta());
+        Streamer videoStreamer = new Streamer(connection.getVideoFd(), options.getVideoCodec(), false, options.getSendFrameMeta(),
+                this::onSessionProgress);
 
         // Forward the virtual display notification both to the Controller (input events routing) and to the session listener
         VirtualDisplayListener vdListener = (displayId, positionMapper) -> {
@@ -622,6 +638,65 @@ public final class CarLinkServer {
                 terminationLatch.countDown();
             });
         }
+
+        startWatchdog();
+    }
+
+    // Called by the session I/O threads whenever bytes were actually exchanged with the head unit (a video packet or a device
+    // message written, a control message received). Timestamps only move forward, so a plain set() keeps the max semantics.
+    private void onSessionProgress() {
+        lastProgressMs.set(SystemClock.uptimeMillis());
+    }
+
+    /**
+     * Start the session watchdog: a daemon thread which force-terminates the session once no progress (see
+     * {@link #onSessionProgress()}) was observed for {@link #SESSION_STALL_TIMEOUT_MS}. This is what always reclaims a session
+     * whose peer vanished without a FIN (head unit powered off or unplugged: such a half-open connection surfaces no I/O error
+     * for a very long time), instead of holding the single library instance forever and rejecting every later connection as busy.
+     * <p>
+     * A healthy but idle session is never killed: the Controller heartbeat (every 10s) is written successfully and counts as
+     * progress. On a dead peer the write blocks or fails, progress stops, and the watchdog shuts both sockets down (failing
+     * every blocked write, e.g. the video encoder's or the device message sender's) and then takes the same termination path as
+     * a fatal processor error: {@code terminationLatch} wakes the session thread, which reports the error and runs the full
+     * {@link #terminate()} cleanup.
+     */
+    private void startWatchdog() {
+        // The session starts healthy: without this baseline a session that never gets going (e.g. the encoder never produces
+        // its first frame) would trip the timeout before having had a chance
+        lastProgressMs.set(SystemClock.uptimeMillis());
+        // Captured for the watchdog thread: connection is otherwise confined to the session thread and never reassigned
+        CarLinkConnection watchdogConnection = connection;
+        watchdogThread = new Thread(() -> {
+            try {
+                while (true) {
+                    Thread.sleep(WATCHDOG_CHECK_INTERVAL_MS);
+                    long stalledMs = SystemClock.uptimeMillis() - lastProgressMs.get();
+                    if (stalledMs > SESSION_STALL_TIMEOUT_MS) {
+                        Ln.w("CarLink session stalled: no progress for " + stalledMs + " ms, forcing termination");
+                        watchdogConnection.shutdown();
+                        sessionErrorCause.compareAndSet(null, new IOException("Session stalled: no progress for " + stalledMs + " ms"));
+                        terminationLatch.countDown();
+                        return;
+                    }
+                }
+            } catch (InterruptedException e) {
+                // stopWatchdog() interrupted the sleep: normal session teardown
+            } catch (Throwable t) {
+                // In-process hosting: never let an Error escape the thread, it would kill the hosting app process
+                Ln.e("Session watchdog error", t);
+            } finally {
+                Ln.d("Session watchdog stopped");
+            }
+        }, "session-watchdog");
+        watchdogThread.setDaemon(true);
+        watchdogThread.start();
+    }
+
+    private void stopWatchdog() {
+        if (watchdogThread != null) {
+            watchdogThread.interrupt();
+            watchdogThread = null;
+        }
     }
 
     // Called on the video encoder thread (from NewDisplayCapture)
@@ -639,6 +714,9 @@ public final class CarLinkServer {
     // Upstream Server.scrcpy() finally-chain semantics: stop, shutdown, join, release
     private void terminate() {
         running.set(false);
+
+        // The watchdog must not fire while the teardown it may have triggered is already running
+        stopWatchdog();
 
         for (AsyncProcessor asyncProcessor : asyncProcessors) {
             asyncProcessor.stop();

@@ -33,6 +33,9 @@ public class DeviceMessageWriter {
             case DeviceMessage.TYPE_ACK_CLIPBOARD:
                 dos.writeLong(msg.getSequence());
                 break;
+            case DeviceMessage.TYPE_HEARTBEAT:
+                // A heartbeat is the type byte alone, without any payload
+                break;
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }
