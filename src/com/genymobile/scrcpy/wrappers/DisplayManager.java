@@ -199,7 +199,7 @@ public final class DisplayManager {
             // STATE_UNKNOWN resets the display to the state it should have now (i.e. on), STATE_OFF powers it off
             int state = on ? Display.STATE_UNKNOWN : Display.STATE_OFF;
             return (boolean) method.invoke(manager, displayId, state);
-        } catch (ReflectiveOperationException e) {
+        } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
             return false;
         }

@@ -71,9 +71,11 @@ public final class IO {
     }
 
     /**
-     * @return {@code true} if the write failed because the peer is gone: {@code EPIPE} (write after an orderly close) or
-     * {@code ECONNRESET} (the peer sent a RST, e.g. the head unit crashed or rebooted). Both are expected on session
-     * teardown and must terminate the stream cleanly, not trigger the encoder retry path.
+     * @return {@code true} if the write failed because the peer is gone: {@code EPIPE} (write after an orderly close),
+     * {@code ECONNRESET} (the peer sent a RST, e.g. the head unit crashed or rebooted) or {@code ETIMEDOUT} (the kernel
+     * aborted the connection because unacknowledged data exceeded TCP_USER_TIMEOUT, see {@code CarLinkConnection}: the
+     * peer is half-open dead — the first write on such a connection fails with ETIMEDOUT, later ones with EPIPE). All
+     * are expected on session teardown and must terminate the stream cleanly, not trigger the encoder retry path.
      */
     public static boolean isBrokenPipe(IOException e) {
         Throwable cause = e.getCause();
@@ -81,7 +83,7 @@ public final class IO {
             return false;
         }
         int errno = ((ErrnoException) cause).errno;
-        return errno == OsConstants.EPIPE || errno == OsConstants.ECONNRESET;
+        return errno == OsConstants.EPIPE || errno == OsConstants.ECONNRESET || errno == OsConstants.ETIMEDOUT;
     }
 
     public static boolean isBrokenPipe(Exception e) {

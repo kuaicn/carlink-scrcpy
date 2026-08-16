@@ -80,7 +80,11 @@ public class DisplayMonitor {
                     }
                 }
             };
-            ServiceManager.getWindowManager().registerDisplayWindowListener(displayWindowListener);
+            int[] existingDisplayIds = ServiceManager.getWindowManager().registerDisplayWindowListener(displayWindowListener);
+            if (existingDisplayIds == null) {
+                // Registration failed, do not attempt to unregister later
+                displayWindowListener = null;
+            }
         }
     }
 

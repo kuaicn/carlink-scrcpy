@@ -241,9 +241,13 @@ public final class OpenGLRunner {
     public void stopAndRelease() {
         final Semaphore sem = new Semaphore(0);
 
-        // Snapshot the static field: shutdown() resets it, and posting to a quit Looper would silently drop the runnable,
-        // making the semaphore wait below block forever
-        Handler currentHandler = handler;
+        // Snapshot the static field under the class monitor (shutdown() resets it under the same lock): an unsynchronized
+        // read could observe a stale value, and posting to a quit Looper would silently drop the runnable, making the
+        // semaphore wait below block forever
+        Handler currentHandler;
+        synchronized (OpenGLRunner.class) {
+            currentHandler = handler;
+        }
         if (currentHandler == null) {
             Ln.w("OpenGLRunner already shut down, GL resources not released");
             return;
@@ -252,7 +256,9 @@ public final class OpenGLRunner {
         boolean posted = currentHandler.post(() -> {
             try {
                 stopped = true;
-                surfaceTexture.setOnFrameAvailableListener(null, handler);
+                // Unregister via the same Handler this runnable runs on (never re-read the static field: shutdown() may
+                // have nulled it concurrently)
+                surfaceTexture.setOnFrameAvailableListener(null, currentHandler);
 
                 filter.release();
 

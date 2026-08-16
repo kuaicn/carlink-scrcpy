@@ -18,6 +18,10 @@ public final class WindowManager {
     public static final int DISPLAY_IME_POLICY_FALLBACK_DISPLAY = 1;
     public static final int DISPLAY_IME_POLICY_HIDE = 2;
 
+    // Set once a registration attempt is denied by system_server (missing MANAGE_ACTIVITY_TASKS): the outcome is deterministic for
+    // this process, so further attempts are skipped silently instead of logging a full stack trace on every session
+    private static boolean displayWindowListenerRegistrationDenied;
+
     private final IInterface manager;
     private Method getRotationMethod;
 
@@ -30,7 +34,6 @@ public final class WindowManager {
     private Method thawDisplayRotationMethod;
     private int thawDisplayRotationMethodVersion;
 
-    private Method getDisplayImePolicyMethod;
     private Method setDisplayImePolicyMethod;
 
     static WindowManager create() {
@@ -191,49 +194,46 @@ public final class WindowManager {
         }
     }
 
+    private static boolean isCausedBySecurityException(Throwable e) {
+        while (e != null) {
+            if (e instanceof SecurityException) {
+                return true;
+            }
+            e = e.getCause();
+        }
+        return false;
+    }
+
     @TargetApi(AndroidVersions.API_30_ANDROID_11)
     public int[] registerDisplayWindowListener(IDisplayWindowListener listener) {
+        if (displayWindowListenerRegistrationDenied) {
+            // Already denied in this process, do not retry (and do not log) on every session
+            return null;
+        }
         try {
             return (int[]) manager.getClass().getMethod("registerDisplayWindowListener", IDisplayWindowListener.class).invoke(manager, listener);
         } catch (Exception e) {
-            Ln.e("Could not register display window listener", e);
+            if (isCausedBySecurityException(e)) {
+                // WindowManagerService.registerDisplayWindowListener() requires MANAGE_ACTIVITY_TASKS, log it once without stack trace
+                displayWindowListenerRegistrationDenied = true;
+                Ln.w("Could not register display window listener (MANAGE_ACTIVITY_TASKS not granted), display properties changes will not be monitored");
+            } else {
+                Ln.e("Could not register display window listener", e);
+            }
         }
         return null;
     }
 
     @TargetApi(AndroidVersions.API_30_ANDROID_11)
     public void unregisterDisplayWindowListener(IDisplayWindowListener listener) {
+        if (displayWindowListenerRegistrationDenied) {
+            // The listener was never registered
+            return;
+        }
         try {
             manager.getClass().getMethod("unregisterDisplayWindowListener", IDisplayWindowListener.class).invoke(manager, listener);
         } catch (Exception e) {
             Ln.e("Could not unregister display window listener", e);
-        }
-    }
-
-    @TargetApi(AndroidVersions.API_29_ANDROID_10)
-    private Method getGetDisplayImePolicyMethod() throws NoSuchMethodException {
-        if (getDisplayImePolicyMethod == null) {
-            if (Build.VERSION.SDK_INT >= AndroidVersions.API_31_ANDROID_12) {
-                getDisplayImePolicyMethod = manager.getClass().getMethod("getDisplayImePolicy", int.class);
-            } else {
-                getDisplayImePolicyMethod = manager.getClass().getMethod("shouldShowIme", int.class);
-            }
-        }
-        return getDisplayImePolicyMethod;
-    }
-
-    @TargetApi(AndroidVersions.API_29_ANDROID_10)
-    public int getDisplayImePolicy(int displayId) {
-        try {
-            Method method = getGetDisplayImePolicyMethod();
-            if (Build.VERSION.SDK_INT >= AndroidVersions.API_31_ANDROID_12) {
-                return (int) method.invoke(manager, displayId);
-            }
-            boolean shouldShowIme = (boolean) method.invoke(manager, displayId);
-            return shouldShowIme ? DISPLAY_IME_POLICY_LOCAL : DISPLAY_IME_POLICY_FALLBACK_DISPLAY;
-        } catch (Throwable e) {
-            Ln.e("Could not invoke method", e);
-            return -1;
         }
     }
 

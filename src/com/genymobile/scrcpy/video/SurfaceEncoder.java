@@ -260,7 +260,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
 
         // Retry with a smaller size
-        Ln.i("Retrying with -m" + newMaxSize + "...");
+        Ln.i("Retrying with max size " + newMaxSize + "...");
         return true;
     }
 

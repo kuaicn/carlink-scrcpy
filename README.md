@@ -30,25 +30,26 @@ Genymobile/scrcpy **server 端**的车机互联魔改版：手机端投屏采集
 3. **网络层 LocalSocket → TCP**：删除 `device/DesktopConnection.java`（adb 隧道 abstract socket），新增 `device/CarLinkConnection.java`——视频通道为本库 `ServerSocket` accept 的 TCP 连接（经 `ParcelFileDescriptor.fromSocket()` 保住 `Streamer` 的 `Os.write` 路径），控制通道为调用方握手完成后移交的已连接 TCP socket；`ControlChannel` 改为接收 `InputStream`/`OutputStream`。
 4. **wire 协议精简**：不发送 64 字节设备名 meta、无 dummy byte、无 session meta 包；视频流首 4 字节即 codec id（大端 `"h264"`/`"h265"`），随后为「12 字节头 + 裸 Annex-B」packet 序列。详见 `docs/carlink-protocol.md`。
 5. **`util/Ln` 精简**：只保留 logcat 输出（TAG `scrcpy`），删除控制台/文件描述符输出与 `disableSystemStreams()`。
-6. **`Options` 新增 `i_frame_interval` key**（上游硬编码 10s），供 `Config.iFrameIntervalSec` 透传。
+6. **编码/输入相关 `Options` key 透传**：新增 `i_frame_interval`（上游硬编码 10s）供 `Config.iFrameIntervalSec` 透传；`display_ime_policy` 默认值改为 `local`（上游缺省不设置，IME 回退到手机默认屏弹出——车机是唯一交互屏，IME 必须弹在虚拟屏上；Android 13 以下虚拟屏不可信、设置被忽略），供 `Config.displayImePolicy` 透传。
 7. **虚拟屏事件导出**：`NewDisplayCapture` 的 `VirtualDisplayListener` 通知在会话编排层同时转发给 `CarLinkServer.Listener.onVirtualDisplayReady(displayId)`。
+8. **虚拟屏电源断言（Android 15+）**：`NewDisplayCapture` 创建虚拟屏后调 `DisplayManagerGlobal.requestDisplayPowerState(displayId, STATE_ON)`——车机会话期间手机物理屏熄灭、设备进入 doze 时，新建虚拟屏会被一并拉灭导致投屏画面冻结，必须显式唤醒（失败仅告警，不致命）。
 
 ### 健壮性改造（in-process 托管）
 
 上游 server 运行在独立进程，线程漏出 `Error`、join 卡死最多杀死自己；in-process 托管后这些都直接威胁宿主互联服务进程，因此做了以下改造（均已真机验证）：
 
 1. **全链路 Throwable 兜底**：所有自建线程（会话/video/control-recv/control-send）捕获 `Throwable`，任何 `Error`（如虚拟屏创建失败的 `AssertionError`）不会逃出线程杀死宿主进程；processor 异常终止的首个错误经 `AsyncProcessor.onTerminated(fatalError, cause)` 传递，由会话线程通过 `Listener.onError()` 上报（随后 `onStopped()`）。
-2. **单消息容错**：`Controller` 应用单条控制消息时的 `RuntimeException`（权限被收回、事件被系统拒绝等）只记日志、会话继续；已定义但不支持的 CAMERA_* / RESIZE_DISPLAY 消息不会落到上游的 `AssertionError`（后者由非 flex 虚拟屏抛 `IllegalStateException`，同样被容错捕获）。
+2. **单消息容错**：`Controller` 应用单条控制消息时的 `RuntimeException`（权限被收回、事件被系统拒绝等）只记日志、会话继续；已定义但不支持的 CAMERA_* / RESIZE_DISPLAY 消息在 `Controller` 分发处直接丢弃（RESIZE_DISPLAY 记一条警告日志，CAMERA_* 静默丢弃），不会落到上游的 `AssertionError`（后者会终止会话）。
 3. **有界 join**：会话拆除链上所有 `join()`（`Controller`/`DeviceMessageSender`/`SurfaceEncoder`/`OpenGLRunner`）均有 2s 上限，卡死的线程不再永久阻塞清理；`stop()` 中断会话线程也不再跳过后续 join 与 GL 线程关停。
-4. **视频 accept 看门狗**：`accept()` 以 2s 轮询（`VIDEO_ACCEPT_POLL_MS`），等待车机视频连接期间检测到控制通道已断开（`isControlSocketDead()`）即结束会话，不留孤儿会话空转；另有 30s 总体超时（`VIDEO_ACCEPT_TIMEOUT_MS`）兜底——车机断电/拔线造成的半开死控制连接（收不到 FIN）轮询探测不到，超时即到点结束会话并释放库实例，后续连接不会被永久 busy 拒绝。
+4. **视频 accept 看门狗 + 对端校验**：`accept()` 以 2s 轮询（`VIDEO_ACCEPT_POLL_MS`），等待车机视频连接期间检测到控制通道已断开（`isControlSocketDead()`）即结束会话，不留孤儿会话空转；另有 30s 总体超时（`VIDEO_ACCEPT_TIMEOUT_MS`）兜底——车机断电/拔线造成的半开死控制连接（收不到 FIN）轮询探测不到，超时即到点结束会话并释放库实例，后续连接不会被永久 busy 拒绝。accept 到的视频连接还会校验来源 IP 必须等于控制通道对端 IP，否则拒绝并继续等待（视频端口在手机热点上可被其他设备扫到，先到先得会把画面流给陌生连接）。
 5. **协议长度上限**：`ControlMessageReader` 对带长度前缀的字段在分配缓冲前拒绝超过 256 KiB（`MESSAGE_MAX_SIZE`）的长度——上游的 4 字节长度字段可被诱导分配至多 4GB。
 6. **资源清理补全**：stop() 注销系统剪贴板 autosync 监听（否则每会话泄漏一个 listener 并回调进死会话）、`shutdownNow()` 关闭 `startAppExecutor`；视频连接建立前中止的路径同样关闭调用方移交的控制 socket；`CarLinkConnection` 建立失败不泄漏 dup 出的 fd；`SurfaceEncoder` 启动阶段失败即释放 codec/capture；`OpenGLRunner` 关停后复位静态线程引用（重开会话拿到新线程）。
 7. **日志埋点**：视频连接 accept 成功、首次触控注入成功（里程碑，证明注入链路端到端可用）、注入被系统持续拒绝（一次性告警，不刷屏）等关键路径日志。
-8. **心跳 + 会话看门狗**：会话期间每 10s 向控制通道投递 HEARTBEAT device 消息（自有协议扩展，type=3，仅 1 字节）；看门狗以「实际完成的通道 I/O」（视频帧写出、控制消息接收、device 消息写出）为进展信号，30s 无进展即 shutdown 两条通道并走既有 terminate() 完整清理——车机断电/断网黑洞（无 FIN）导致的悬挂会话被回收，库单实例不再被永久占用（详见 `docs/carlink-protocol.md`「HEARTBEAT 与会话保活」）。
+8. **心跳 + 会话看门狗 + TCP_USER_TIMEOUT**：会话期间每 10s 向控制通道投递 HEARTBEAT device 消息（自有协议扩展，type=3，仅 1 字节）；看门狗以「实际完成的通道 I/O」（视频帧写出、控制消息接收、device 消息写出）为进展信号，30s 无进展即 shutdown 两条通道并走既有 terminate() 完整清理——车机断电/断网黑洞（无 FIN）导致的悬挂会话被回收，库单实例不再被永久占用（详见 `docs/carlink-protocol.md`「HEARTBEAT 与会话保活」）。两条 socket 均由 `CarLinkConnection` 设置 `TCP_USER_TIMEOUT=20s`（best-effort，低于 30s 看门狗窗口）：否则半开死连接的内核发送缓冲会把稀疏写（尤其 10s 心跳）「成功」拖 15–30 分钟（tcp_retries2），看门狗永远被喂养、死会话永不回收。
 
 ## 架构与线程模型
 
-调用方在任意线程调用 `start()`：同步完成参数解析与视频 `ServerSocket` 绑定后，全部会话工作（阻塞 accept 视频连接、启动编码/控制 processor、Looper 事件泵、结束时的完整清理）运行在自建 **`HandlerThread("carlink-scrcpy")`** 上，停止时 `quitSafely()` 的只会是这个 Looper，绝不触碰 app 主 Looper。编码、控制收发各有独立线程；`Listener` 全部回调直接在本库内部线程上触发，**调用方需自行切线程**。
+调用方在任意线程调用 `start()`：同步完成参数解析与视频 `ServerSocket` 绑定后，全部会话工作（阻塞 accept 视频连接、启动编码/控制 processor、Looper 事件泵、结束时的完整清理）运行在自建 **`HandlerThread("carlink-scrcpy")`** 上，停止时 `quitSafely()` 的只会是这个 Looper，绝不触碰 app 主 Looper。编码、控制收发各有独立线程，另有 `session-watchdog` 守护线程与 `heartbeat` 心跳线程（见健壮性改造 8）；`Listener` 全部回调直接在本库内部线程上触发，**调用方需自行切线程**。
 
 ```
 调用方线程                carlink-scrcpy (HandlerThread)        video 线程            control-recv / control-send
@@ -135,7 +136,7 @@ server.stop();
 
 1. 将本仓库放入 LineageOS 源码树，建议路径 `vendor/carlink/scrcpy`；
 2. 互联服务模块 `Android.bp` 添加 `static_libs: ["carlink_scrcpy"]`，并使用 `certificate: "platform"` + `privileged: true`；
-3. 配置 signature 权限白名单（`INJECT_EVENTS` / `INTERNAL_SYSTEM_WINDOW` / `ADD_TRUSTED_DISPLAY` / `ADD_ALWAYS_UNLOCKED_DISPLAY`）。
+3. 配置 signature 权限白名单（`INJECT_EVENTS` / `INTERNAL_SYSTEM_WINDOW` / `ADD_TRUSTED_DISPLAY` / `ADD_ALWAYS_UNLOCKED_DISPLAY` / `MANAGE_ACTIVITY_TASKS` / `WRITE_SECURE_SETTINGS` / `START_ACTIVITIES_FROM_BACKGROUND` 等，全集与树内实际文件见 integration.md）。
 
 完整步骤、Android.bp 片段、白名单 XML 示例与 sepolicy 说明见 **[docs/integration.md](docs/integration.md)**。
 
@@ -149,8 +150,8 @@ server.stop();
 ## 同步上游策略
 
 - 包名与目录结构保持 `com.genymobile.scrcpy` 不变；魔改集中在少数文件，rebase 时重点关注：
-  - 新增：`CarLinkServer.java`、`device/CarLinkConnection.java`、`util/AppContext.java`（及本仓库的 `docs/carlink-*.md`）；
-  - 修改：`Options.java`（`i_frame_interval`；裁剪已删特性的选项）、`video/SurfaceEncoder.java`（i-frame 间隔透传；启动失败资源释放、有界 join）、`device/Streamer.java`（codec id 无条件首发）、`control/ControlChannel.java`（流式构造）、`control/Controller.java` 与 `control/DeviceMessageSender.java`（Throwable 兜底、有界 join 等健壮性改造）、`control/ControlMessageReader.java`（长度上限）、`AsyncProcessor.java`（终止回调带 `cause`）、`opengl/OpenGLRunner.java`（线程复位与有界 join）、`util/Ln.java`（仅 logcat）、`wrappers/` 与 `device/Device.java`（`AppContext`）；
+  - 新增：`CarLinkServer.java`、`device/CarLinkConnection.java`（含 `TCP_USER_TIMEOUT` 设置）、`util/AppContext.java`（及本仓库的 `docs/carlink-*.md`）；
+  - 修改：`Options.java`（`i_frame_interval`；裁剪已删特性的选项）、`video/SurfaceEncoder.java`（i-frame 间隔透传；启动失败资源释放、有界 join）、`video/NewDisplayCapture.java`（Android 15+ 虚拟屏电源断言）、`device/Streamer.java`（codec id 无条件首发）、`control/ControlChannel.java`（流式构造）、`control/Controller.java` 与 `control/DeviceMessageSender.java`（Throwable 兜底、有界 join 等健壮性改造；心跳线程）、`control/DeviceMessage.java`（HEARTBEAT type=3 扩展）、`control/ControlMessageReader.java`（长度上限）、`AsyncProcessor.java`（终止回调带 `cause`）、`opengl/OpenGLRunner.java`（线程复位与有界 join）、`util/Ln.java`（仅 logcat）、`wrappers/` 与 `device/Device.java`（`AppContext`）；
   - 删除：`Server.java`、`FakeContext.java`、`Workarounds.java`、`device/DesktopConnection.java`，及死代码 `wrappers/ContentProvider.java`、`util/SettingsException.java`、`util/HandlerExecutor.java`、`video/VideoSource.java`；
 - 其余目录（`video/`、`control/`、`display/`、`opengl/`、`model/`、`wrappers/` 大部分）与上游基本一致，可直接采用上游修复；
 - `BuildConfig.VERSION_NAME` 必须跟随上游基线版本号（`Options.parse` 首参数版本校验依赖它）。

@@ -30,10 +30,16 @@ public final class DeviceMessage {
         return event;
     }
 
+    // A heartbeat carries no payload, so a single shared instance is enough: it is fully initialized here (class-init, hence safely
+    // published), never mutated afterwards (only DeviceMessageWriter reads it), and the same instance may legitimately sit in the
+    // sender queue several times. This avoids one allocation per heartbeat tick (every 10s for the whole session).
+    private static final DeviceMessage HEARTBEAT = new DeviceMessage();
+    static {
+        HEARTBEAT.type = TYPE_HEARTBEAT;
+    }
+
     public static DeviceMessage createHeartbeat() {
-        DeviceMessage event = new DeviceMessage();
-        event.type = TYPE_HEARTBEAT;
-        return event;
+        return HEARTBEAT;
     }
 
     public int getType() {

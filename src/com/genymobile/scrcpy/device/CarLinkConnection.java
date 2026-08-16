@@ -4,6 +4,9 @@ import com.genymobile.scrcpy.control.ControlChannel;
 import com.genymobile.scrcpy.util.Ln;
 
 import android.os.ParcelFileDescriptor;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 
 import java.io.Closeable;
 import java.io.FileDescriptor;
@@ -21,6 +24,20 @@ import java.net.SocketException;
  * bytes written on the video socket are the 4-byte codec id written by {@link Streamer#writeVideoHeader()}.
  */
 public final class CarLinkConnection implements Closeable {
+
+    // Linux UAPI value of TCP_USER_TIMEOUT: OsConstants does not expose it (it is not part of the public SDK), but the value
+    // is fixed by the kernel ABI
+    private static final int TCP_USER_TIMEOUT = 18;
+
+    /**
+     * Bound on how long unacknowledged data may linger before the kernel aborts the connection. Without it, a half-open
+     * dead peer (head unit powered off or unplugged, no FIN/RST ever sent) keeps accepting our sparse writes — in
+     * particular the 10s heartbeats, a few bytes each — into its kernel send buffer until tcp_retries2 gives up
+     * (15-30 min): every such "successful" write feeds the CarLinkServer session watchdog, so the dead session would
+     * never be reclaimed. The value must stay below the 30s watchdog window ({@code CarLinkServer.SESSION_STALL_TIMEOUT_MS})
+     * so that writes to a dead peer start failing — stopping progress stamps — before the watchdog checks.
+     */
+    private static final int TCP_USER_TIMEOUT_MS = 20000;
 
     private final Socket videoSocket;
     // Dup of the video socket fd (ParcelFileDescriptor.fromSocket() dup()s it) so that Streamer can keep using the Os.write() path.
@@ -40,6 +57,8 @@ public final class CarLinkConnection implements Closeable {
         } catch (SocketException e) {
             throw new IOException(e);
         }
+        setTcpUserTimeout(videoSocket);
+        setTcpUserTimeout(controlSocket);
 
         ParcelFileDescriptor pfd = ParcelFileDescriptor.fromSocket(videoSocket);
         if (pfd == null) {
@@ -58,6 +77,37 @@ public final class CarLinkConnection implements Closeable {
             throw e;
         }
         videoPfd = pfd;
+    }
+
+    /**
+     * Set TCP_USER_TIMEOUT on the socket (see {@link #TCP_USER_TIMEOUT_MS}). Best effort: if the kernel rejects it, the
+     * session watchdog still catches stalls of a streaming video channel, only half-open detection of an idle session
+     * degrades back to the TCP retransmit timeout.
+     */
+    private static void setTcpUserTimeout(Socket socket) {
+        // Os.setsockoptInt() needs a FileDescriptor: fromSocket() dup()s it, and the sockopt applies to the shared
+        // underlying socket, so closing the dup right away is fine
+        ParcelFileDescriptor pfd;
+        try {
+            pfd = ParcelFileDescriptor.fromSocket(socket);
+        } catch (RuntimeException e) {
+            Ln.w("Could not dup socket fd for TCP_USER_TIMEOUT: " + e.getMessage());
+            return;
+        }
+        if (pfd == null) {
+            return;
+        }
+        try {
+            Os.setsockoptInt(pfd.getFileDescriptor(), OsConstants.IPPROTO_TCP, TCP_USER_TIMEOUT, TCP_USER_TIMEOUT_MS);
+        } catch (ErrnoException | RuntimeException e) {
+            Ln.w("Could not set TCP_USER_TIMEOUT: " + e.getMessage());
+        } finally {
+            try {
+                pfd.close();
+            } catch (IOException e) {
+                // ignore
+            }
+        }
     }
 
     public FileDescriptor getVideoFd() {

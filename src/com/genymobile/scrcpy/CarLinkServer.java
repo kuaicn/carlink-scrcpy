@@ -193,7 +193,9 @@ public final class CarLinkServer {
             }
 
             public Builder maxFps(float maxFps) {
-                if (maxFps < 0) {
+                // Reject NaN (NaN < 0 is false, so it would pass a plain range check and then be silently treated as
+                // unlimited by buildOptions()) and +Infinity (it would be passed verbatim to MediaFormat)
+                if (maxFps < 0 || Float.isNaN(maxFps) || maxFps == Float.POSITIVE_INFINITY) {
                     throw new IllegalArgumentException("Invalid max fps: " + maxFps);
                 }
                 this.maxFps = maxFps;
@@ -273,7 +275,9 @@ public final class CarLinkServer {
      * The session watchdog force-terminates the session when no progress (any successful channel I/O, see
      * {@link SessionProgressListener}) was observed for this long. The heartbeat the Controller queues every 10s keeps a
      * healthy but idle session (static screen, no input) fed; on a dead peer (head unit powered off, network black hole)
-     * the heartbeat write blocks or fails, progress stops and the watchdog fires.
+     * the heartbeat write blocks or fails, progress stops and the watchdog fires. A plain "successful" write would not be
+     * enough there — a half-open peer keeps accepting sparse writes into its kernel send buffer for 15-30 min — which is
+     * why {@code CarLinkConnection} sets TCP_USER_TIMEOUT below this window, so that writes to a dead peer actually fail.
      */
     private static final int SESSION_STALL_TIMEOUT_MS = 30000;
 
@@ -326,8 +330,10 @@ public final class CarLinkServer {
      *                      by the caller; from now on it carries the scrcpy control message stream (docs/control.md)
      * @param listener      the session events listener
      * @return the running session handle
+     * @throws NullPointerException     if any parameter is null
      * @throws IllegalStateException    if a session is already running
-     * @throws IllegalArgumentException if the configuration is invalid
+     * @throws IllegalArgumentException if the configuration is invalid (Config.Builder already validates each value eagerly; any
+     *                                  remaining parse error is reported synchronously here)
      * @throws UncheckedIOException     if the video ServerSocket could not be bound
      */
     public static synchronized CarLinkServer start(Context context, Config config, Socket controlSocket, Listener listener) {
@@ -366,6 +372,8 @@ public final class CarLinkServer {
         CarLinkServer server = new CarLinkServer(options, controlSocket, listener, videoServerSocket);
         instance = server;
         try {
+            Ln.i("CarLink session starting: " + config.getWidth() + "x" + config.getHeight() + "/" + config.getDensityDpi() + "dpi, "
+                    + config.getCodec() + ", " + config.getBitRate() + " bps, video port " + videoServerSocket.getLocalPort());
             server.startSession();
         } catch (Throwable t) {
             // Roll back so that a later start() is not blocked by a dead instance
@@ -383,6 +391,9 @@ public final class CarLinkServer {
     /**
      * Build the upstream {@code key=value} arguments and let {@link Options#parse(String...)} produce the Options (zero reimplementation
      * of the parsing logic). The first element must be the version to satisfy the version check.
+     * <p>
+     * {@code max_fps} and {@code i_frame_interval} are omitted when they hold their default: the Options defaults (0 and 10) must then
+     * match {@link Config#DEFAULT_MAX_FPS} and {@link Config#DEFAULT_I_FRAME_INTERVAL_SEC} — keep them in sync if either side changes.
      */
     private static Options buildOptions(Config config) {
         List<String> args = new ArrayList<>();
@@ -578,7 +589,9 @@ public final class CarLinkServer {
             Os.poll(pollfds, 0);
             return (pollfd.revents & (POLLRDHUP | OsConstants.POLLERR | OsConstants.POLLHUP)) != 0;
         } catch (ErrnoException e) {
-            return true;
+            // An interrupted poll (EINTR) says nothing about the peer: report "alive" and let the next accept poll tick
+            // re-check, rather than aborting the video wait spuriously. Any other errno means the fd is unusable.
+            return e.errno != OsConstants.EINTR;
         } finally {
             try {
                 pfd.close();
@@ -643,7 +656,9 @@ public final class CarLinkServer {
     }
 
     // Called by the session I/O threads whenever bytes were actually exchanged with the head unit (a video packet or a device
-    // message written, a control message received). Timestamps only move forward, so a plain set() keeps the max semantics.
+    // message written, a control message received). Concurrent set() calls from these threads can race (an older stamp
+    // overwriting a newer one by at most a thread-scheduling delay), which is noise against the 30s watchdog window: a plain
+    // atomic store is enough, no CAS-max loop is needed on the hot per-packet path.
     private void onSessionProgress() {
         lastProgressMs.set(SystemClock.uptimeMillis());
     }
@@ -655,10 +670,10 @@ public final class CarLinkServer {
      * for a very long time), instead of holding the single library instance forever and rejecting every later connection as busy.
      * <p>
      * A healthy but idle session is never killed: the Controller heartbeat (every 10s) is written successfully and counts as
-     * progress. On a dead peer the write blocks or fails, progress stops, and the watchdog shuts both sockets down (failing
-     * every blocked write, e.g. the video encoder's or the device message sender's) and then takes the same termination path as
-     * a fatal processor error: {@code terminationLatch} wakes the session thread, which reports the error and runs the full
-     * {@link #terminate()} cleanup.
+     * progress. On a dead peer the write blocks or fails within TCP_USER_TIMEOUT (see {@link #SESSION_STALL_TIMEOUT_MS}),
+     * progress stops, and the watchdog shuts both sockets down (failing every blocked write, e.g. the video encoder's or the
+     * device message sender's) and then takes the same termination path as a fatal processor error: {@code terminationLatch}
+     * wakes the session thread, which reports the error and runs the full {@link #terminate()} cleanup.
      */
     private void startWatchdog() {
         // The session starts healthy: without this baseline a session that never gets going (e.g. the encoder never produces
@@ -673,8 +688,11 @@ public final class CarLinkServer {
                     long stalledMs = SystemClock.uptimeMillis() - lastProgressMs.get();
                     if (stalledMs > SESSION_STALL_TIMEOUT_MS) {
                         Ln.w("CarLink session stalled: no progress for " + stalledMs + " ms, forcing termination");
-                        watchdogConnection.shutdown();
+                        // Set the error cause BEFORE shutdown(): shutting the sockets down immediately fails the processor
+                        // threads, whose termination listeners also count down the latch — the session thread could otherwise
+                        // win that race, read a null cause and report a clean stop, silently losing this stall error
                         sessionErrorCause.compareAndSet(null, new IOException("Session stalled: no progress for " + stalledMs + " ms"));
+                        watchdogConnection.shutdown();
                         terminationLatch.countDown();
                         return;
                     }
@@ -771,6 +789,10 @@ public final class CarLinkServer {
                 instance = null;
             }
         }
+
+        // Reached on every path (stop(), peer disconnect, fatal error): closes the session narrative opened by the
+        // "session starting" log, so a whole session can be followed in logcat
+        Ln.i("CarLink session stopped");
 
         try {
             listener.onStopped();

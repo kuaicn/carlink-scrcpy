@@ -138,7 +138,6 @@ public class NewDisplayCapture extends SurfaceCapture {
                 displaySize = displaySize.constrain(videoConstraints, false);
             } else {
                 if (displaySize == null) {
-                    assert !flexDisplay;
                     displaySize = mainDisplaySize;
                 }
 
@@ -241,6 +240,11 @@ public class NewDisplayCapture extends SurfaceCapture {
             }
             VirtualDisplay vd = ServiceManager.getDisplayManager()
                     .createNewVirtualDisplay("scrcpy", displaySize.getWidth(), displaySize.getHeight(), dpi, surface, flags);
+            if (vd == null) {
+                // DisplayManagerGlobal returns null (without throwing) when system_server failed to create the display
+                // (e.g. the per-package virtual display limit is reached)
+                throw new IOException("Virtual display creation returned null");
+            }
             setCurrentVirtualDisplay(vd); // used for client resize
             int virtualDisplayId = vd.getDisplay().getDisplayId();
             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
@@ -248,7 +252,12 @@ public class NewDisplayCapture extends SurfaceCapture {
             // The car session turns the phone panel off, which makes the device doze; a newly created virtual
             // display follows the device into OFF state and the projected image would freeze. Force it on.
             if (Build.VERSION.SDK_INT >= AndroidVersions.API_35_ANDROID_15) {
-                ServiceManager.getDisplayManager().requestDisplayPowerState(virtualDisplayId, Display.STATE_ON);
+                boolean on = ServiceManager.getDisplayManager().requestDisplayPowerState(virtualDisplayId, Display.STATE_ON);
+                if (!on) {
+                    // Non-fatal (the display may still work if the device is not dozing), but without this the projected
+                    // image freezes, so make the failure visible
+                    Ln.w("Could not power on the virtual display, the projected image may freeze");
+                }
             }
 
             if (displayImePolicy != -1) {

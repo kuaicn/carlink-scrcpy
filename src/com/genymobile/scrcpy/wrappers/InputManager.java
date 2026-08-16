@@ -1,11 +1,9 @@
 package com.genymobile.scrcpy.wrappers;
 
-import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.util.AppContext;
 import com.genymobile.scrcpy.util.Ln;
 
 import android.annotation.SuppressLint;
-import android.annotation.TargetApi;
 import android.content.Context;
 import android.view.InputEvent;
 import android.view.MotionEvent;
@@ -26,8 +24,6 @@ public final class InputManager {
     private static Method injectInputEventMethod;
     private static Method setDisplayIdMethod;
     private static Method setActionButtonMethod;
-    private static Method addUniqueIdAssociationByPortMethod;
-    private static Method removeUniqueIdAssociationByPortMethod;
 
     static InputManager create() {
         android.hardware.input.InputManager manager = (android.hardware.input.InputManager) AppContext.get()
@@ -60,7 +56,10 @@ public final class InputManager {
                         long now = System.currentTimeMillis();
                         if (lastPermissionLogDate <= now - 3000) {
                             Ln.e(message);
-                            Ln.e("Make sure you have enabled \"USB debugging (Security Settings)\" and then rebooted your device.");
+                            // The upstream advice (enable "USB debugging (Security Settings)" and reboot) targeted the adb shell
+                            // user on MIUI; this library runs inside a platform-signed privapp, where the relevant fix is the
+                            // signature permission whitelist (see docs/integration.md)
+                            Ln.e("The hosting app must hold the INJECT_EVENTS permission (platform signature permission whitelist)");
                             lastPermissionLogDate = now;
                         }
                         // Do not print the stack trace
@@ -106,42 +105,6 @@ public final class InputManager {
         } catch (ReflectiveOperationException e) {
             Ln.e("Cannot set action button on MotionEvent", e);
             return false;
-        }
-    }
-
-    private static Method getAddUniqueIdAssociationByPortMethod() throws NoSuchMethodException {
-        if (addUniqueIdAssociationByPortMethod == null) {
-            addUniqueIdAssociationByPortMethod = android.hardware.input.InputManager.class.getMethod(
-                    "addUniqueIdAssociationByPort", String.class, String.class);
-        }
-        return addUniqueIdAssociationByPortMethod;
-    }
-
-    @TargetApi(AndroidVersions.API_35_ANDROID_15)
-    public void addUniqueIdAssociationByPort(String inputPort, String uniqueId) {
-        try {
-            Method method = getAddUniqueIdAssociationByPortMethod();
-            method.invoke(manager, inputPort, uniqueId);
-        } catch (Throwable e) {
-            Ln.e("Cannot add unique id association by port", e);
-        }
-    }
-
-    private static Method getRemoveUniqueIdAssociationByPortMethod() throws NoSuchMethodException {
-        if (removeUniqueIdAssociationByPortMethod == null) {
-            removeUniqueIdAssociationByPortMethod = android.hardware.input.InputManager.class.getMethod(
-                    "removeUniqueIdAssociationByPort", String.class);
-        }
-        return removeUniqueIdAssociationByPortMethod;
-    }
-
-    @TargetApi(AndroidVersions.API_35_ANDROID_15)
-    public void removeUniqueIdAssociationByPort(String inputPort) {
-        try {
-            Method method = getRemoveUniqueIdAssociationByPortMethod();
-            method.invoke(manager, inputPort);
-        } catch (Throwable e) {
-            Ln.e("Cannot remove unique id association by port", e);
         }
     }
 }
